@@ -1,4 +1,5 @@
-# Full stack on one VM. Start: `make up`. RAM: ~6 GB while training, ~3 GB idle.
+# Full stack on one VM. `make up` starts the core (~2.5 GB RAM idle, ~3.5 GB while training);
+# `make up-monitoring` adds Prometheus + Grafana (~0.3 GB). On a 4 GB VM, add swap first.
 x-common-env: &common-env
   DATABASE_URL: postgresql+psycopg2://species:${POSTGRES_PASSWORD:-species}@postgres:5432/species
   MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
@@ -65,7 +66,11 @@ services:
       AIRFLOW__CORE__DAGS_FOLDER: /opt/project/airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
-      AIRFLOW__WEBSERVER__WORKERS: "2"
+      # Low-memory settings: one webserver worker, one DAG parser, two tasks at a time
+      AIRFLOW__WEBSERVER__WORKERS: "1"
+      AIRFLOW__SCHEDULER__PARSING_PROCESSES: "1"
+      AIRFLOW__CORE__PARALLELISM: "2"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
     entrypoint: ["bash", "/opt/project/docker/airflow-start.sh"]
     volumes:
       - .:/opt/project          # code, params.yaml, data/ (DVC-tracked), DAGs
@@ -75,11 +80,13 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.55.1
+    profiles: [monitoring]
     volumes: [./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
     ports: ["9090:9090"]
 
   grafana:
     image: grafana/grafana:11.3.0
+    profiles: [monitoring]
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
       API_ADMIN_USER: ${API_ADMIN_USER:-admin}

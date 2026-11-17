@@ -1,4 +1,4 @@
-.PHONY: help venv test lint ingest features train compare predict drift up down logs train-dag clean-docker
+.PHONY: help venv test lint ingest features train compare predict drift up up-monitoring down logs train-dag clean-docker
 
 PY ?= .venv/bin/python
 IMG ?=
@@ -35,11 +35,16 @@ predict:         ## make predict IMG=path/to/photo.jpg
 drift:           ## run the drift / production-performance check once
 	$(PY) -m src.monitoring.drift
 
-up:              ## build and start the whole stack
+up:              ## build and start the core stack (postgres, mlflow, api, streamlit, airflow)
+	docker compose build airflow
+	docker compose build api
 	docker compose up -d --build
 
+up-monitoring:   ## add Prometheus + Grafana
+	docker compose --profile monitoring up -d
+
 down:            ## stop the stack (volumes kept)
-	docker compose down
+	docker compose --profile monitoring down
 
 logs:
 	docker compose logs -f --tail=100

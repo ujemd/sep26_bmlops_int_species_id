@@ -135,6 +135,9 @@ echo "AIRFLOW_UID=$(id -u)" >> .env
 make up
 ```
 
+Prometheus and Grafana start separately, with `make up-monitoring`. The core stack needs about
+3.5 GB of RAM while training; on a 4 GB VM, add 4 GB of swap first (see `docs/ROADMAP.md`).
+
 Then open Airflow at http://localhost:8080 and trigger `species_training` (or run `make train-dag`).
 The first run downloads about 1,500 photos (~90 MB) and trains in a few minutes on a CPU. When it
 finishes, open http://localhost:8501.

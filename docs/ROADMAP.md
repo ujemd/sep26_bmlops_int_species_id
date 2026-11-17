@@ -19,6 +19,20 @@ panels) for the README and the defense.
 2. Grafana alert webhook (the drift DAG already closes the loop).
 3. Extractor comparison with three models: two are enough.
 
+## Memory budget (3.8 GB RAM VM)
+
+| Service | Approx. RAM |
+|---|---|
+| Airflow (scheduler + 1 webserver worker) | ~1.0 GB |
+| Training task (extractor + images in batches) | ~1.0 GB peak |
+| API (torch + model) | ~0.5 GB |
+| MLflow, PostgreSQL, Streamlit | ~0.5 GB |
+| Prometheus + Grafana (`make up-monitoring`) | ~0.3 GB |
+
+Add a 4 GB swap file before the first `make up`; builds and training peaks will spill into it
+instead of getting killed. If it is still too slow, run `make up` without monitoring while
+training, and start Grafana only for monitoring work and the demo.
+
 ## Disk budget (18 GB available)
 
 | Item | Approx. size |
