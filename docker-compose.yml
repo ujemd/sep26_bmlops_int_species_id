@@ -1,0 +1,96 @@
+# Full stack on one VM. Start: `make up`. RAM: ~6 GB while training, ~3 GB idle.
+x-common-env: &common-env
+  DATABASE_URL: postgresql+psycopg2://species:${POSTGRES_PASSWORD:-species}@postgres:5432/species
+  MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+  MLFLOW_TRACKING_USERNAME: ${MLFLOW_TRACKING_USERNAME:-}
+  MLFLOW_TRACKING_PASSWORD: ${MLFLOW_TRACKING_PASSWORD:-}
+  API_URL: http://api:8000
+  API_ADMIN_USER: ${API_ADMIN_USER:-admin}
+  API_ADMIN_PASSWORD: ${API_ADMIN_PASSWORD:-change-me}
+  AIRFLOW_URL: http://airflow:8080
+  AIRFLOW_USER: ${AIRFLOW_USER:-admin}
+  AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: species
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-species}
+      POSTGRES_DB: species
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "species"]
+      interval: 5s
+      retries: 10
+
+  mlflow:
+    build: {context: ., dockerfile: docker/mlflow.Dockerfile}
+    image: ${DOCKERHUB_USER:-local}/species-mlflow:latest
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql://species:${POSTGRES_PASSWORD:-species}@postgres:5432/mlflow
+      --artifacts-destination /mlartifacts --serve-artifacts
+    volumes: [mlartifacts:/mlartifacts]
+    ports: ["5000:5000"]
+    depends_on: {postgres: {condition: service_healthy}}
+
+  api:
+    build: {context: ., dockerfile: docker/api.Dockerfile}
+    image: ${DOCKERHUB_USER:-local}/species-api:latest
+    environment: *common-env
+    ports: ["8000:8000"]
+    depends_on: {postgres: {condition: service_healthy}, mlflow: {condition: service_started}}
+    restart: unless-stopped
+
+  streamlit:
+    build: {context: ., dockerfile: docker/streamlit.Dockerfile}
+    image: ${DOCKERHUB_USER:-local}/species-streamlit:latest
+    environment: {API_URL: "http://api:8000"}
+    ports: ["8501:8501"]
+    depends_on: [api]
+
+  airflow:
+    build: {context: ., dockerfile: docker/airflow.Dockerfile}
+    image: ${DOCKERHUB_USER:-local}/species-airflow:latest
+    user: "${AIRFLOW_UID:-50000}:0"
+    environment:
+      <<: *common-env
+      PROJECT_ROOT: /opt/project
+      PYTHONPATH: /opt/project
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://species:${POSTGRES_PASSWORD:-species}@postgres:5432/airflow
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/project/airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+      AIRFLOW__WEBSERVER__WORKERS: "2"
+    entrypoint: ["bash", "/opt/project/docker/airflow-start.sh"]
+    volumes:
+      - .:/opt/project          # code, params.yaml, data/ (DVC-tracked), DAGs
+      - hf-cache:/home/airflow/.cache
+    ports: ["8080:8080"]
+    depends_on: {postgres: {condition: service_healthy}, mlflow: {condition: service_started}}
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes: [./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      API_ADMIN_USER: ${API_ADMIN_USER:-admin}
+      API_ADMIN_PASSWORD: ${API_ADMIN_PASSWORD:-change-me}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  pgdata:
+  mlartifacts:
+  hf-cache:

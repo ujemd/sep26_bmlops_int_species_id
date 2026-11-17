@@ -1,53 +1,245 @@
-Project Name
-==============================
+# Species identification from photographs: an MLOps pipeline
 
-This project is a starting Pack for MLOps projects based on the subject "movie_recommandation". It's not perfect so feel free to make some modifications on it.
+A service that identifies a species from a photograph and returns a confidence level. When the
+model is not sure enough, it refers the observation to a human. Around it sits an automated
+pipeline that ingests openly licensed iNaturalist photos, versions them, retrains, compares,
+deploys and monitors the model.
 
-Project Organization
-------------
+> **Principle of the project:** the model is deliberately simple (a frozen pre-trained extractor
+> plus a logistic regression); the work is in the production chain around it.
 
-    ├── LICENSE
-    ├── README.md          <- The top-level README for developers using this project.
-    ├── data
-    │   ├── external       <- Data from third party sources.
-    │   ├── interim        <- Intermediate data that has been transformed.
-    │   ├── processed      <- The final, canonical data sets for modeling.
-    │   └── raw            <- The original, immutable data dump.
-    │
-    ├── logs               <- Logs from training and predicting
-    │
-    ├── models             <- Trained and serialized models, model predictions, or model summaries
-    │
-    ├── notebooks          <- Jupyter notebooks. Naming convention is a number (for ordering),
-    │                         the creator's initials, and a short `-` delimited description, e.g.
-    │                         `1.0-jqp-initial-data-exploration`.
-    │
-    ├── references         <- Data dictionaries, manuals, and all other explanatory materials.
-    │
-    ├── reports            <- Generated analysis as HTML, PDF, LaTeX, etc.
-    │   └── figures        <- Generated graphics and figures to be used in reporting
-    │
-    ├── requirements.txt   <- The requirements file for reproducing the analysis environment, e.g.
-    │                         generated with `pip freeze > requirements.txt`
-    │
-    ├── src                <- Source code for use in this project.
-    │   ├── __init__.py    <- Makes src a Python module
-    │   │
-    │   ├── data           <- Scripts to download or generate data
-    │   │   └── make_dataset.py
-    │   │
-    │   ├── features       <- Scripts to turn raw data into features for modeling
-    │   │   └── build_features.py
-    │   │
-    │   ├── models         <- Scripts to train models and then use trained models to make
-    │   │   │                 predictions
-    │   │   ├── predict_model.py
-    │   │   └── train_model.py
-    │   │
-    │   ├── visualization  <- Scripts to create exploratory and results oriented visualizations
-    │   │   └── visualize.py
-    │   └── config         <- Describe the parameters used in train_model.py and predict_model.py
+---
 
---------
+## Architecture
 
-<p><small>Project based on the <a target="_blank" href="https://drivendata.github.io/cookiecutter-data-science/">cookiecutter data science project template</a>. #cookiecutterdatascience</small></p>
+```mermaid
+flowchart LR
+    subgraph Sources
+        INAT[iNaturalist API v1<br/>metadata, licenses]
+        S3[(AWS open-data bucket<br/>openly licensed photos)]
+    end
+
+    subgraph Training["Training pipeline (Airflow, weekly or on alert)"]
+        ING[ingest<br/>license filter + attribution] --> FEAT[extract_features<br/>frozen timm backbone]
+        FEAT --> DVC[version_data<br/>DVC → DagsHub]
+        DVC --> TRAIN[train<br/>LogReg head + conformal calibration]
+        TRAIN --> PROMO{better than<br/>champion?}
+        PROMO -- yes --> RELOAD[reload API]
+    end
+
+    subgraph Serving["Prediction pipeline (real time)"]
+        UI[Streamlit] --> API[FastAPI /predict]
+        API --> PG[(PostgreSQL<br/>predictions + feedback)]
+    end
+
+    subgraph Monitoring
+        PROM[Prometheus] --> GRAF[Grafana<br/>dashboard + alert]
+        DRIFT[monitoring DAG<br/>Evidently on embeddings]
+    end
+
+    INAT --> ING
+    S3 --> ING
+    TRAIN <--> MLF[(MLflow<br/>tracking + registry)]
+    API -- loads @champion --> MLF
+    API -- /metrics --> PROM
+    GRAF -- webhook --> API
+    API -- /train --> Training
+    PG --> DRIFT
+    DRIFT -- drift or accuracy drop --> Training
+```
+
+| Service | Port | Role |
+|---|---|---|
+| `api` | 8000 | FastAPI: `/predict`, `/feedback`, `/train`, `/reload`, `/metrics`, docs at `/docs` |
+| `streamlit` | 8501 | User interface: upload a photo, see the answer, correct it |
+| `airflow` | 8080 | `species_training` (weekly) and `species_monitoring` (daily) DAGs |
+| `mlflow` | 5000 | Experiment tracking and model registry (alias `champion`) |
+| `postgres` | 5432 | Training metadata, predictions, feedback; MLflow and Airflow back ends |
+| `prometheus` | 9090 | Scrapes API metrics |
+| `grafana` | 3000 | Dashboard and the alert that triggers retraining |
+
+---
+
+## How it works
+
+### 1. Data: open licenses and attribution
+`src/data/ingest.py` queries the iNaturalist API for **research-grade** observations of the taxa
+listed in `params.yaml`. It respects the 60 requests/minute limit and fetches only observations
+newer than the last one stored, so every scheduled run adds new data.
+
+A photo is kept only if **both** conditions hold:
+- its license is in `allowed_licenses` (CC0, CC BY, CC BY-NC, CC BY-SA, CC BY-NC-SA; "no
+  derivatives" licenses are excluded);
+- it is hosted on `inaturalist-open-data.s3.amazonaws.com`. Photos on `static.inaturalist.org`
+  are not openly licensed and are rejected even if the metadata looks right.
+
+The license code and the attribution string are stored for every photo (in PostgreSQL and in
+`data/raw/metadata.csv`). Each MLflow run also logs a `training_data_attribution.csv`, so a model
+can always be traced back to the authors of its training images.
+
+> The full open-data metadata dump on S3 is 36 GB, too large for the project VM. Calling the API
+> for metadata is cheap: about 30 requests for 10 taxa.
+
+### 2. Model: frozen extractor, simple head
+- **Extractor:** `mobilenetv3_large_100` from `timm`, frozen. Embeddings are cached per photo, so a
+  retraining run only embeds new images.
+- **Head:** `StandardScaler` + `LogisticRegression(class_weight="balanced")`. It trains in seconds
+  on a CPU.
+- **Split:** train / calibration / test (70 / 15 / 15), stratified, fixed seed.
+
+### 3. Confidence and human review: conformal prediction
+Following Angelopoulos & Bates (2021), the calibration split gives a threshold `qhat` such that the
+**prediction set** `{species : p ≥ 1 − qhat}` contains the true species at least 90% of the time
+(`alpha = 0.10`). The API asks for human review when:
+- the set holds more than one species (the model hesitates), or it is empty (nothing looks
+  familiar, which often means the photo is outside the perimeter); or
+- the top probability is below `min_confidence`.
+
+The headline metric is therefore **`test_auto_accuracy`**: the accuracy of the answers the service
+gives *without* a human, together with the **`test_review_rate`**, the share it hands over.
+
+### 4. Versioning and promotion
+- **Data:** `dvc add data/raw` (DVC without Git, as the course recommends), pushed to a DagsHub
+  remote. The DVC hash is stored as the `dataset_version` tag on every MLflow run.
+- **Model:** each run is registered in the MLflow registry. The new version gets the `champion`
+  alias only if it beats the current champion **on the same test set**, and it must also reach
+  `min_macro_f1`. The decision and its reason are written as a tag on the version.
+- **Deployment:** the API serves whatever version holds `champion`, and the DAG calls `/reload`
+  after a promotion. Rolling back means moving the alias in the MLflow UI and calling `/reload`.
+
+### 5. Monitoring and the feedback loop
+- **Prometheus/Grafana:** request rate, p50/p95 latency, predictions per minute, review rate,
+  mean confidence, accuracy on feedback, and the model version in production.
+- **Alert:** if more than 50% of predictions over an hour need review, Grafana calls
+  `POST /webhooks/grafana`, which triggers the training DAG.
+- **Drift (Evidently, daily DAG):** this week's photo embeddings are compared with the training
+  embeddings, after projecting both onto 10 PCA components. If drift is detected, or the accuracy
+  on user corrections drops below 70%, the training DAG is triggered. The HTML report is logged in
+  MLflow.
+- **Feedback:** users correct a prediction in Streamlit (`POST /feedback`), and these labels feed
+  the production-accuracy metric.
+
+---
+
+## Quick start
+
+```bash
+cp .env.example .env
+```
+
+```bash
+echo "AIRFLOW_UID=$(id -u)" >> .env
+```
+
+```bash
+make up
+```
+
+Then open Airflow at http://localhost:8080 and trigger `species_training` (or run `make train-dag`).
+The first run downloads about 1,500 photos (~90 MB) and trains in a few minutes on a CPU. When it
+finishes, open http://localhost:8501.
+
+Local development, without Docker:
+
+```bash
+make venv
+```
+
+```bash
+make ingest features train
+```
+
+```bash
+make predict IMG=path/to/photo.jpg
+```
+
+```bash
+make test
+```
+
+### Using DagsHub (optional, recommended)
+1. Create a DagsHub repository, then set `MLFLOW_TRACKING_URI`, `MLFLOW_TRACKING_USERNAME` and
+   `MLFLOW_TRACKING_PASSWORD` in `.env` (see `.env.example`).
+2. Add the DVC remote once:
+
+```bash
+dvc init --no-scm
+```
+
+```bash
+dvc remote add -d origin https://dagshub.com/<user>/<repo>.dvc
+```
+
+```bash
+dvc remote modify origin --local auth basic
+```
+
+```bash
+dvc remote modify origin --local user <user>
+```
+
+```bash
+dvc remote modify origin --local password <token>
+```
+
+---
+
+## Repository layout
+
+```
+├── params.yaml                 taxa, licenses, extractor, thresholds: everything tunable
+├── src/
+│   ├── config.py               paths and environment variables
+│   ├── db.py                   SQLAlchemy schema (observations, photos, predictions, feedback)
+│   ├── data/ingest.py          iNaturalist ingestion, license filter, attribution
+│   ├── features/extract.py     frozen timm extractor and embedding cache
+│   ├── models/train.py         training.py: train, evaluate, log, register, promote, compare
+│   ├── models/predict.py       predict.py: load the champion and identify a photo
+│   ├── models/conformal.py     split conformal prediction
+│   ├── monitoring/drift.py     Evidently drift and feedback accuracy
+│   └── api/main.py             FastAPI service
+├── airflow/dags/               species_training, species_monitoring
+├── streamlit_app/app.py        user interface
+├── docker/                     one Dockerfile per service
+├── monitoring/                 Prometheus config, Grafana datasource, dashboard and alert
+├── k8s/api.yaml                optional k3s deployment of the API with autoscaling
+├── tests/                      unit tests (no network, no model weights needed)
+└── .github/workflows/          ci.yaml (lint, test, build), release.yaml (push to Docker Hub)
+```
+
+---
+
+## Scope against the subject's levels
+
+| Level | Item | Status |
+|---|---|---|
+| 1 | ~10 taxa, frozen extractor, ingestion-to-deployment chain closed | ✅ |
+| 1 | License filtering and attribution kept through the pipeline | ✅ |
+| 2 | Same-protocol comparison of extractors, accuracy vs cost (`make compare`) | ✅ script, results to fill in |
+| 2 | Service optimisation: CPU-only torch, baked weights, slim API image | ✅ partial |
+| 2 | Versioning a growing dataset with DVC, hardlinked cache | ✅ |
+| 3 | Feedback collection, production accuracy, prediction history | ✅ |
+| 3 | Label revisions (past predictions when the ground truth changes) | 📝 design in `docs/ROADMAP.md` |
+| 4 | Out-of-perimeter detection | ✅ partial (empty or ambiguous conformal set → review) |
+| 4 | New taxon without manual work | ✅ add a name to `params.yaml`: ingestion, training and promotion handle it |
+
+## Design choices
+
+- **FastAPI rather than BentoML for serving.** The MLflow registry already handles model
+  versioning, and one serving framework is easier to explain and debug in a week.
+- **Logistic regression rather than fine-tuning.** It trains in seconds, is well calibrated enough
+  for conformal prediction, and keeps the focus on the chain.
+- **Embeddings as the drift signal.** Raw pixels are high-dimensional and noisy. PCA on the
+  embeddings captures what the model actually "sees".
+- **Airflow runs project code in its own virtualenv.** Airflow 2.10 pins SQLAlchemy 1.4, while
+  the project uses 2.0; separate interpreters avoid the conflict.
+
+## References
+
+- Van Horn et al., *The iNaturalist Species Classification and Detection Dataset*, 2017.
+- Cui et al., *Class-Balanced Loss Based on Effective Number of Samples*, 2019.
+- Angelopoulos & Bates, *A Gentle Introduction to Conformal Prediction*, 2021.
+- iNaturalist open data: https://github.com/inaturalist/inaturalist-open-data
+
+Training photos © their respective iNaturalist authors, used under the Creative Commons license
+recorded for each photo in `data/raw/metadata.csv`.

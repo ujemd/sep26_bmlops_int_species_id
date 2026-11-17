@@ -1,0 +1,49 @@
+# Single source of truth for the pipeline. Every value here is logged to MLflow.
+
+data:
+  # Level 1 perimeter: ten common, well-documented taxa from several kingdoms.
+  # Names are resolved to iNaturalist taxon ids at ingestion time.
+  taxa:
+    - Danaus plexippus          # monarch butterfly
+    - Apis mellifera            # western honey bee
+    - Coccinella septempunctata # seven-spot ladybird
+    - Cardinalis cardinalis     # northern cardinal
+    - Turdus migratorius        # American robin
+    - Anas platyrhynchos        # mallard
+    - Sciurus carolinensis      # eastern gray squirrel
+    - Taraxacum officinale      # common dandelion
+    - Achillea millefolium      # common yarrow
+    - Amanita muscaria          # fly agaric
+  # Licenses we accept. Only these photos are mirrored on the open-data S3 bucket
+  # and are reusable. "No derivatives" (nd) licenses are excluded on purpose.
+  allowed_licenses: [cc0, cc-by, cc-by-nc, cc-by-sa, cc-by-nc-sa]
+  open_data_host: inaturalist-open-data.s3.amazonaws.com
+  photo_size: medium            # ~500 px long side, ~60 KB
+  first_run_per_taxon: 150      # images per taxon on the first ingestion
+  increment_per_taxon: 30       # new images per taxon on each scheduled run
+  max_per_taxon: 400            # hard cap to protect the disk
+
+features:
+  extractor: mobilenetv3_large_100   # comparison candidates: efficientnet_b0, resnet50, vit_small_patch14_dinov2.lvd142m
+  image_size: 224
+  batch_size: 32
+
+train:
+  seed: 42
+  test_size: 0.15
+  calib_size: 0.15
+  C: 1.0
+  max_iter: 2000
+  min_macro_f1: 0.60          # a model below this is never promoted
+
+serve:
+  alpha: 0.10                 # conformal error rate: prediction sets cover the truth >= 90% of the time
+  min_confidence: 0.50        # below this top-1 probability, always ask a human
+  top_k: 3
+
+monitoring:
+  drift_window_days: 7
+  min_current_samples: 50
+  drift_share_threshold: 0.5  # fraction of drifted PCA components that counts as drift
+  pca_components: 10
+  min_feedback_accuracy: 0.70

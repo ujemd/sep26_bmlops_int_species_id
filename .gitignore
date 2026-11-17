@@ -76,7 +76,9 @@ target/
 .ipynb_checkpoints/
 
 # exclude data from source control by default
-/data/
+/data/*
+!/data/raw.dvc
+!/data/.gitkeep
 
 # Mac OS-specific storage files
 .DS_Store
@@ -87,3 +89,16 @@ target/
 
 # Mypy cache
 .mypy_cache/
+
+# Project
+.venv/
+.env
+data/raw/
+data/processed/
+data/*.db
+.dvc/cache/
+.dvc/tmp/
+mlruns/
+mlartifacts/
+reports/*.html
+reports/*.csv

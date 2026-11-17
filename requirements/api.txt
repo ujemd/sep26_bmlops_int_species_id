@@ -1,0 +1,15 @@
+# Inference service. torch/torchvision are installed from the CPU wheel index in the Dockerfile.
+timm==1.0.31
+scikit-learn==1.9.1
+numpy==2.0.2
+pandas==2.3.3  # needed by mlflow.models
+pillow==13.0.0
+mlflow-skinny==2.22.0
+fastapi==0.163.2
+uvicorn[standard]==0.54.0
+python-multipart==0.0.34
+prometheus-fastapi-instrumentator==8.1.0
+sqlalchemy>=2.0,<2.1  # MLflow 2.22 breaks with SQLAlchemy 2.1
+psycopg2-binary==2.9.13
+requests==2.34.2
+pyyaml==6.0.3
