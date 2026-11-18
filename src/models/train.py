@@ -38,6 +38,7 @@ def dataset_version() -> str:
                 return line.split("md5:")[1].strip()
     return hashlib.md5(config.METADATA_CSV.read_bytes()).hexdigest()
 
+
 def dvc_hash(target: str) -> str:
     """md5 that DVC recorded for data/<target>, or 'untracked'."""
     f = config.DATA_DIR / f"{target}.dvc"
@@ -46,6 +47,7 @@ def dvc_hash(target: str) -> str:
             if "md5:" in line:
                 return line.split("md5:")[1].strip()
     return "untracked"
+
 
 def split(meta: pd.DataFrame, p: dict) -> np.ndarray:
     """Stable split by photo id: a photo stays in the same part as the dataset grows, so a new
