@@ -22,6 +22,7 @@ data:
   first_run_per_taxon: 150      # images per taxon on the first ingestion
   increment_per_taxon: 30       # new images per taxon on each scheduled run
   max_per_taxon: 400            # hard cap to protect the disk
+  start_date: "2025-01-01"      # only observations uploaded after this date
 
 features:
   extractor: mobilenetv3_large_100   # comparison candidates: efficientnet_b0, resnet50, vit_small_patch14_dinov2.lvd142m

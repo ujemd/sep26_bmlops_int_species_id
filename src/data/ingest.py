@@ -109,7 +109,7 @@ def ingest_taxon(name: str, n_new: int, p: dict) -> int:
     added = 0
     while added < n_new:
         page = api_get("observations", taxon_id=taxon_id, quality_grade="research", photos="true",
-                       photo_license=",".join(allowed), order_by="id", order="asc",
+                       photo_license=",".join(allowed), order_by="id", order="asc", created_d1=p["start_date"],
                        id_above=cursor, per_page=200)["results"]
         if not page:
             break
