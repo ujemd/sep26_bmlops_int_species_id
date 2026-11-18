@@ -29,6 +29,7 @@ features:
   batch_size: 32
 
 train:
+  min_images_per_class: 20
   seed: 42
   test_size: 0.15
   calib_size: 0.15
