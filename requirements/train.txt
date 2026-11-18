@@ -1,7 +1,0 @@
-# Training + monitoring (Airflow worker, local development)
--r api.txt
-mlflow==2.22.0
-pyarrow>=17
-evidently==0.4.40
-dvc==3.67.1
-matplotlib>=3.9

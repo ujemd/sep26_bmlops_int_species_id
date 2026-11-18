@@ -1,13 +1,16 @@
-FROM python:3.11-slim
+FROM ghcr.io/astral-sh/uv:X.Y.Z AS uv
 
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/opt/hf PROJECT_ROOT=/app
+FROM python:3.11-slim
+COPY --from=uv /uv /usr/local/bin/uv
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HF_HOME=/opt/hf PROJECT_ROOT=/app \
+    UV_PROJECT_ENVIRONMENT=/opt/venv UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never \
+    PATH="/opt/venv/bin:$PATH"
 WORKDIR /app
 
-# CPU-only torch: ~200 MB instead of ~2.5 GB for the default CUDA build
-RUN pip install torch==2.15.0 torchvision==0.29.2 --index-url https://download.pytorch.org/whl/cpu
-COPY requirements/api.txt requirements/api.txt
-RUN pip install -r requirements/api.txt
+# Exact versions from uv.lock; CPU-only torch comes from the PyTorch index set in pyproject.toml
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --locked --only-group api
 
 # Bake the extractor weights into the image: no download at start-up, reproducible deploys
 ARG EXTRACTOR=mobilenetv3_large_100
