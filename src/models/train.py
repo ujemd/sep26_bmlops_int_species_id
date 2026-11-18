@@ -99,6 +99,13 @@ def train(extractor_name: str | None = None, promote: bool = True, pretrained: b
     extractor_name = extractor_name or prm["features"]["extractor"]
     extract.build(extractor_name, pretrained=pretrained)
     X, y, meta = extract.dataset(extractor_name)
+    counts = pd.Series(y).value_counts()
+    keep = counts[counts >= p["min_images_per_class"]].index
+    if len(keep) < len(counts):
+        log.warning("dropping classes with < %d images: %s", p["min_images_per_class"],
+                    sorted(set(counts.index) - set(keep)))
+    mask = np.isin(y, keep)
+    X, y, meta = X[mask], y[mask], meta[mask].reset_index(drop=True)
     X_tr, X_cal, X_te, y_tr, y_cal, y_te = split(X, y, p)
 
     mlflow.set_tracking_uri(config.MLFLOW_TRACKING_URI)
