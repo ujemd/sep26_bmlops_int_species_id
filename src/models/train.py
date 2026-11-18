@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import time
+import io
 
 import mlflow
 import numpy as np
@@ -18,7 +19,6 @@ import pandas as pd
 from mlflow.tracking import MlflowClient
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report, f1_score, top_k_accuracy_score
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -39,11 +39,12 @@ def dataset_version() -> str:
     return hashlib.md5(config.METADATA_CSV.read_bytes()).hexdigest()
 
 
-def split(X, y, p):
-    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=p["test_size"], stratify=y, random_state=p["seed"])
-    rel = p["calib_size"] / (1 - p["test_size"])
-    X_tr, X_cal, y_tr, y_cal = train_test_split(X_tr, y_tr, test_size=rel, stratify=y_tr, random_state=p["seed"])
-    return X_tr, X_cal, X_te, y_tr, y_cal, y_te
+def split(meta: pd.DataFrame, p: dict) -> np.ndarray:
+    """Stable split by photo id: a photo stays in the same part as the dataset grows, so a new
+    model and the champion are never tested on photos the champion was trained on."""
+    bucket = meta.photo_id.map(lambda i: int(hashlib.md5(f"{p['seed']}-{i}".encode()).hexdigest(), 16) % 100)
+    test_pct, cal_pct = round(p["test_size"] * 100), round(p["calib_size"] * 100)
+    return np.where(bucket < test_pct, "test", np.where(bucket < test_pct + cal_pct, "calib", "train"))
 
 
 def evaluate(head, X, y, qhat, min_conf) -> dict:
@@ -66,17 +67,21 @@ def evaluate(head, X, y, qhat, min_conf) -> dict:
     }
 
 
-def benchmark(extractor_name: str, image_paths: list[str], pretrained: bool) -> dict:
-    """Service-cost metrics for the extractor: single-image CPU latency, size, parameter count."""
+def benchmark(extractor_name: str, head, image_paths: list[str], pretrained: bool) -> dict:
+    """CPU cost of one full prediction on test photos: JPEG decode + preprocessing + extractor + head."""
     from PIL import Image
 
     ex = extract.Extractor(extractor_name, pretrained=pretrained)
-    ims = [Image.open(config.ROOT / p) for p in image_paths]
-    ex.embed(ims[:1])  # warm-up
+    blobs = [(config.ROOT / p).read_bytes() for p in image_paths]
+
+    def predict_one(blob):
+        head.predict_proba(ex.embed([Image.open(io.BytesIO(blob))]))
+
+    predict_one(blobs[0])  # warm-up
     t = []
-    for im in ims:
+    for blob in blobs:
         t0 = time.perf_counter()
-        ex.embed([im])
+        predict_one(blob)
         t.append((time.perf_counter() - t0) * 1000)
     return {"latency_ms_p50": float(np.median(t)), "latency_ms_p95": float(np.percentile(t, 95)),
             "params_millions": ex.n_params / 1e6, "weights_mb": ex.n_params * 4 / 2**20,
@@ -106,7 +111,10 @@ def train(extractor_name: str | None = None, promote: bool = True, pretrained: b
                     sorted(set(counts.index) - set(keep)))
     mask = np.isin(y, keep)
     X, y, meta = X[mask], y[mask], meta[mask].reset_index(drop=True)
-    X_tr, X_cal, X_te, y_tr, y_cal, y_te = split(X, y, p)
+    part = split(meta, p)
+    X_tr, X_cal, X_te = X[part == "train"], X[part == "calib"], X[part == "test"]
+    y_tr, y_cal, y_te = y[part == "train"], y[part == "calib"], y[part == "test"]
+    test_paths = meta.local_path[part == "test"].tolist()
 
     mlflow.set_tracking_uri(config.MLFLOW_TRACKING_URI)
     mlflow.set_experiment(config.MLFLOW_EXPERIMENT)
@@ -128,7 +136,7 @@ def train(extractor_name: str | None = None, promote: bool = True, pretrained: b
         metrics = {f"test_{k}": v for k, v in evaluate(head, X_te, y_te, qhat, s["min_confidence"]).items()}
         metrics["qhat"] = qhat
         if bench_images:
-            metrics.update(benchmark(extractor_name, meta.local_path.head(bench_images).tolist(), pretrained))
+            metrics.update(benchmark(extractor_name, head, test_paths[:bench_images], pretrained))
         mlflow.log_metrics(metrics)
         mlflow.log_text(classification_report(y_te, head.predict(X_te), zero_division=0), "classification_report.txt")
 
