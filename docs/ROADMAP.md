@@ -57,3 +57,25 @@ the most.
 
 **Rare species.** BioCLIP (via `open_clip`) can classify zero-shot from a text prompt with the
 species name. This is a possible fallback for a taxon with fewer than ~20 images.
+
+## Pending
+
+- [ ] **Calibrate `min_confidence`** on the calibration set: lowest threshold that keeps
+      auto-accuracy ≥ 95% (currently fixed at 0.5 by hand; only matters when `qhat > 0.5`).
+- [ ] **Security checklist** (before the defense):
+      strong passwords in `.env`; remove the `admin` / `change-me` fallbacks in `docker-compose.yml`
+      and `src/config.py`; Kubernetes Secret for k3s; one Docker Hub token per project.
+- [ ] Extractor comparison (`--compare`), results table in the README.
+- [ ] DagsHub remote for DVC and MLflow.
+
+## Notes for the defense
+
+- **Images vs embeddings:** training only needs embeddings, but images are kept (DVC) to change
+  the extractor, reproduce embeddings, benchmark real latency and produce visual explanations.
+  At scale, the DVC remote is the source of truth and machines pull only what they need.
+- **Licenses:** CC0, BY, BY-SA, BY-NC, BY-NC-SA kept; ND excluded (no derivatives). Attribution
+  travels with the data in `metadata.csv`. NC is fine for a course project.
+- **Split:** hash-based so a photo never changes part as data grows; not exactly stratified
+  (27 ± 5 test photos per species at 180 photos), the price of a fair champion comparison.
+- **Taxa:** common, well-represented, several kingdoms; North American bias of iNaturalist users.
+- **Extractor:** MobileNetV3 as the cheap baseline; bigger models must justify their cost.
