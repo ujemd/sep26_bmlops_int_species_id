@@ -99,9 +99,11 @@ the authors of its training images.
   versioned with DVC, so a retraining run only embeds new images.
 - **Head:** `StandardScaler` + `LogisticRegression(class_weight="balanced")`, saved as one sklearn
   pipeline. It trains in seconds on a CPU.
-- **Split:** train / calibration / test (about 70 / 15 / 15), assigned by a hash of each photo's id.
-  A photo stays in the same part as the dataset grows, so a new model and the champion are never
-  evaluated on photos the champion was trained on.
+- **Split:** train / calibration / test, **stratified and stable**. Within each species, photos are
+  ranked by observation id; every block of 20 consecutive photos gives 14 train, 3 calibration and
+  3 test (70 / 15 / 15 %), from the very first run. Ingestion only appends newer observations, so a
+  photo never changes part as the dataset grows: a new model and the champion are never evaluated
+  on photos the champion was trained on.
 - Species with fewer than `min_images_per_class` photos are left out of training, with a warning.
 
 ### 3. Confidence and human review: conformal prediction
