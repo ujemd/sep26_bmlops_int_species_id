@@ -143,7 +143,7 @@ def export_metadata_csv():
     with session() as s:
         rows = s.execute(select(Photo, Observation).join(Observation).order_by(Photo.id)).all()
     config.RAW_DIR.mkdir(parents=True, exist_ok=True)
-    config.METADATA_CSV.unlink(missing_ok=True)    
+    config.METADATA_CSV.unlink(missing_ok=True)
     with open(config.METADATA_CSV, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(cols)
