@@ -28,7 +28,7 @@ with DAG(
         bash_command=(
             "cd /opt/project && export PATH=/opt/venv/bin:$PATH && "
             "([ -d .dvc ] || dvc init --no-scm -q) && dvc config cache.type hardlink,symlink && "
-            "dvc add data/raw -q && "
+            "dvc add data/raw data/processed -q && "
             "(if [ -n \"$(dvc remote list)\" ]; then dvc push -q; else echo 'no DVC remote, skipping push'; fi)"
         ),
     )

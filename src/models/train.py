@@ -38,6 +38,14 @@ def dataset_version() -> str:
                 return line.split("md5:")[1].strip()
     return hashlib.md5(config.METADATA_CSV.read_bytes()).hexdigest()
 
+def dvc_hash(target: str) -> str:
+    """md5 that DVC recorded for data/<target>, or 'untracked'."""
+    f = config.DATA_DIR / f"{target}.dvc"
+    if f.exists():
+        for line in f.read_text().splitlines():
+            if "md5:" in line:
+                return line.split("md5:")[1].strip()
+    return "untracked"
 
 def split(meta: pd.DataFrame, p: dict) -> np.ndarray:
     """Stable split by photo id: a photo stays in the same part as the dataset grows, so a new
@@ -122,7 +130,8 @@ def train(extractor_name: str | None = None, promote: bool = True, pretrained: b
         mlflow.log_params({"extractor": extractor_name, "n_classes": len(set(y)), "n_train": len(y_tr),
                            "n_calib": len(y_cal), "n_test": len(y_te), "C": p["C"], "alpha": s["alpha"],
                            "min_confidence": s["min_confidence"], "seed": p["seed"]})
-        mlflow.set_tags({"dataset_version": dataset_version(), "pretrained": pretrained})
+        mlflow.set_tags({"dataset_version": dataset_version(), "features_version": dvc_hash("processed"),
+                         "pretrained": pretrained})
 
         t0 = time.perf_counter()
         head = make_pipeline(StandardScaler(), LogisticRegression(

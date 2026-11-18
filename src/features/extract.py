@@ -74,6 +74,7 @@ def build(extractor_name: str | None = None, pretrained: bool = True) -> pd.Data
         log.info("embedded %d images in %.1fs", len(todo), time.perf_counter() - t0)
         config.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
         ids = np.array(list(cache.keys()), dtype=np.int64)
+        cache_path(extractor_name).unlink(missing_ok=True)  # DVC-tracked files are read-only hardlinks
         np.savez_compressed(cache_path(extractor_name), photo_id=ids, X=np.stack([cache[i] for i in ids]))
     return meta
 
