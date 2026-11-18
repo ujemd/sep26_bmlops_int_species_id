@@ -85,7 +85,9 @@ can always be traced back to the authors of its training images.
   retraining run only embeds new images.
 - **Head:** `StandardScaler` + `LogisticRegression(class_weight="balanced")`. It trains in seconds
   on a CPU.
-- **Split:** train / calibration / test (70 / 15 / 15), stratified, fixed seed.
+- **Split:** train / calibration / test (about 70 / 15 / 15), assigned by a hash of each photo's id.
+  A photo stays in the same part as the dataset grows, so a new model and the champion are never
+  evaluated on photos the champion was trained on.
 
 ### 3. Confidence and human review: conformal prediction
 Following Angelopoulos & Bates (2021), the calibration split gives a threshold `qhat` such that the
