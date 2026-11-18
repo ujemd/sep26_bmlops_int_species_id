@@ -118,6 +118,8 @@ def ingest_taxon(name: str, n_new: int, p: dict) -> int:
         for obs in page:
             o, photos = parse_observation(obs, allowed, host, size)
             if o:
+                # label = requested species, even when the observation is identified to a subspecies
+                o.taxon_id, o.taxon_name = taxon_id, canonical
                 batch.append((o, photos[0]))
         batch = batch[: n_new - added]
         with ThreadPoolExecutor(8) as pool:
@@ -141,6 +143,7 @@ def export_metadata_csv():
     with session() as s:
         rows = s.execute(select(Photo, Observation).join(Observation).order_by(Photo.id)).all()
     config.RAW_DIR.mkdir(parents=True, exist_ok=True)
+    config.METADATA_CSV.unlink(missing_ok=True)    
     with open(config.METADATA_CSV, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(cols)
