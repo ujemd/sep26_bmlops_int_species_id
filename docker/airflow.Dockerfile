@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:X.Y.Z AS uv
+FROM ghcr.io/astral-sh/uv:0.13.9 AS uv
 
 FROM apache/airflow:2.10.5-python3.11
 USER root

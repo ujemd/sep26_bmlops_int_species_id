@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
-          version: "X.Y.Z"
+          version: "0.13.9"
           enable-cache: true
       - run: uv sync --locked
       - run: uv run flake8 src tests airflow streamlit_app --max-line-length=127

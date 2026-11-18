@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
-          version: "X.Y.Z"
+          version: "0.13.9"
           enable-cache: true
       - name: Install (exact versions from uv.lock; fails if the lock is out of date)
         run: uv sync --locked
