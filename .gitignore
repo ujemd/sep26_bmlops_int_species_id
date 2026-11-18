@@ -102,3 +102,4 @@ mlruns/
 mlartifacts/
 reports/*.html
 reports/*.csv
+.cache/
