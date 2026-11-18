@@ -61,20 +61,21 @@ services:
       <<: *common-env
       PROJECT_ROOT: /opt/project
       PYTHONPATH: /opt/project
+      HF_HOME: /opt/project/.cache/huggingface   # model weights cache, writable by AIRFLOW_UID
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://species:${POSTGRES_PASSWORD:-species}@postgres:5432/airflow
       AIRFLOW__CORE__DAGS_FOLDER: /opt/project/airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
       # Low-memory settings: one webserver worker, one DAG parser, two tasks at a time
       AIRFLOW__WEBSERVER__WORKERS: "1"
       AIRFLOW__SCHEDULER__PARSING_PROCESSES: "1"
       AIRFLOW__CORE__PARALLELISM: "2"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
-    entrypoint: ["bash", "/opt/project/docker/airflow-start.sh"]
+        # Keep the image's entrypoint: it registers the host UID as a user, which Airflow requires
+    command: ["bash", "/opt/project/docker/airflow-start.sh"]
     volumes:
       - .:/opt/project          # code, params.yaml, data/ (DVC-tracked), DAGs
-      - hf-cache:/home/airflow/.cache
     ports: ["8080:8080"]
     depends_on: {postgres: {condition: service_healthy}, mlflow: {condition: service_started}}
 
@@ -100,4 +101,3 @@ services:
 volumes:
   pgdata:
   mlartifacts:
-  hf-cache:
