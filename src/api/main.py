@@ -49,7 +49,11 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Species identification API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Species identification API", version="0.1.0", lifespan=lifespan,
+    description="Identify a species from a photo, with a calibrated confidence and a referral to human "
+                "review when the model is unsure. Admin routes require HTTP basic auth.",
+)
 Instrumentator().instrument(app).expose(app, include_in_schema=False)
 security = HTTPBasic()
 
@@ -67,19 +71,23 @@ def predictor():
     return STATE["predictor"]
 
 
-@app.get("/health")
+@app.get("/health", tags=["service"])
 def health():
+    """Liveness check, and whether a model is loaded."""
     return {"status": "ok", "model_loaded": STATE["predictor"] is not None}
 
 
-@app.get("/model")
+@app.get("/model", tags=["service"])
 def model_info(p=Depends(predictor)):
+    """Version, extractor, species and dataset version of the model in production."""
     return {"version": p.version, "extractor": p.meta["extractor"], "classes": p.classes,
             "alpha": p.meta["alpha"], "dataset_version": p.meta.get("dataset_version")}
 
 
-@app.post("/predict")
+@app.post("/predict", tags=["prediction"])
 async def predict(file: UploadFile = File(...), p=Depends(predictor)):
+    """Identify the species in a photo: top-k, conformal prediction set, and whether a human should
+    review it. Each call is stored for monitoring."""
     data = await file.read()
     if not data:
         raise HTTPException(400, "Empty file")
@@ -109,8 +117,9 @@ class FeedbackIn(BaseModel):
     source: str = "user"
 
 
-@app.post("/feedback")
+@app.post("/feedback", tags=["prediction"])
 def feedback(fb: FeedbackIn):
+    """Record the true species for a past prediction (user correction or expert review)."""
     with session() as s:
         pred = s.get(Prediction, fb.prediction_id)
         if pred is None:
@@ -130,19 +139,22 @@ def trigger_training(reason: str) -> dict:
     return {"status": "training triggered", "dag_run_id": r.json().get("dag_run_id")}
 
 
-@app.post("/train", dependencies=[Depends(admin)])
+@app.post("/train", tags=["admin"], dependencies=[Depends(admin)])
 def train():
+    """Trigger the Airflow training pipeline."""
     return trigger_training("manual /train call")
 
 
-@app.post("/webhooks/grafana", dependencies=[Depends(admin)])
+@app.post("/webhooks/grafana", tags=["admin"], dependencies=[Depends(admin)])
 def grafana_webhook(payload: dict):
+    """Grafana alert webhook: a firing alert triggers retraining."""
     if payload.get("status") != "firing":
         return {"status": "ignored"}
     return trigger_training(f"grafana alert: {payload.get('title', '')}")
 
 
-@app.post("/reload", dependencies=[Depends(admin)])
+@app.post("/reload", tags=["admin"], dependencies=[Depends(admin)])
 def reload():
+    """Reload the model that holds the champion alias."""
     load_predictor()
     return health()
