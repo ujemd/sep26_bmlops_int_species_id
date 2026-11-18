@@ -8,10 +8,10 @@ Usage:
 """
 import argparse
 import hashlib
+import io
 import json
 import logging
 import time
-import io
 
 import mlflow
 import numpy as np
@@ -50,11 +50,20 @@ def dvc_hash(target: str) -> str:
 
 
 def split(meta: pd.DataFrame, p: dict) -> np.ndarray:
-    """Stable split by photo id: a photo stays in the same part as the dataset grows, so a new
-    model and the champion are never tested on photos the champion was trained on."""
-    bucket = meta.photo_id.map(lambda i: int(hashlib.md5(f"{p['seed']}-{i}".encode()).hexdigest(), 16) % 100)
-    test_pct, cal_pct = round(p["test_size"] * 100), round(p["calib_size"] * 100)
-    return np.where(bucket < test_pct, "test", np.where(bucket < test_pct + cal_pct, "calib", "train"))
+    """Stratified *and* stable train / calib / test assignment.
+
+    Within each species, photos are ranked by observation id. Ingestion only ever appends newer
+    observations, so a photo keeps its rank, and therefore its part, as the dataset grows: a new
+    model and the champion are never tested on photos the champion was trained on. Every block of
+    20 consecutive photos of a species uses the same slots; with the default sizes that is
+    3 test, 3 calib and 14 train (15 / 15 / 70 %), from the very first run.
+    """
+    n_test, n_cal = round(p["test_size"] * 20), round(p["calib_size"] * 20)
+    test_slots = {round(i * 20 / n_test) for i in range(n_test)}
+    calib_slots = {round(i * 20 / n_cal + 10 / n_cal) % 20 for i in range(n_cal)} - test_slots
+    rank = meta.groupby("taxon_name").observation_id.rank(method="first").astype(int) - 1
+    slot = rank % 20
+    return np.where(slot.isin(test_slots), "test", np.where(slot.isin(calib_slots), "calib", "train"))
 
 
 def evaluate(head, X, y, qhat, min_conf) -> dict:
@@ -114,6 +123,7 @@ def train(extractor_name: str | None = None, promote: bool = True, pretrained: b
     extractor_name = extractor_name or prm["features"]["extractor"]
     extract.build(extractor_name, pretrained=pretrained)
     X, y, meta = extract.dataset(extractor_name)
+
     counts = pd.Series(y).value_counts()
     keep = counts[counts >= p["min_images_per_class"]].index
     if len(keep) < len(counts):
@@ -121,17 +131,20 @@ def train(extractor_name: str | None = None, promote: bool = True, pretrained: b
                     sorted(set(counts.index) - set(keep)))
     mask = np.isin(y, keep)
     X, y, meta = X[mask], y[mask], meta[mask].reset_index(drop=True)
+
     part = split(meta, p)
     X_tr, X_cal, X_te = X[part == "train"], X[part == "calib"], X[part == "test"]
     y_tr, y_cal, y_te = y[part == "train"], y[part == "calib"], y[part == "test"]
     test_paths = meta.local_path[part == "test"].tolist()
+    log.info("test photos per species: %s", pd.Series(y_te).value_counts().to_dict())
 
     mlflow.set_tracking_uri(config.MLFLOW_TRACKING_URI)
     mlflow.set_experiment(config.MLFLOW_EXPERIMENT)
     with mlflow.start_run(run_name=f"{extractor_name}-{time.strftime('%Y%m%d-%H%M')}") as run:
         mlflow.log_params({"extractor": extractor_name, "n_classes": len(set(y)), "n_train": len(y_tr),
                            "n_calib": len(y_cal), "n_test": len(y_te), "C": p["C"], "alpha": s["alpha"],
-                           "min_confidence": s["min_confidence"], "seed": p["seed"]})
+                           "min_confidence": s["min_confidence"],
+                           "split": "stratified, by observation order within each species"})
         mlflow.set_tags({"dataset_version": dataset_version(), "features_version": dvc_hash("processed"),
                          "pretrained": pretrained})
 
