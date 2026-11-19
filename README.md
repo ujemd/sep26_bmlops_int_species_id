@@ -195,7 +195,7 @@ Same photos, split, head and metrics for three extractors (`make compare`):
 photos, for 6.7× the latency, beyond the 300 ms target. EfficientNet-B0 is 1.8× slower for no gain.
 All three reach about 0.93: the extractor is not the bottleneck.
 
-![Accuracy vs latency](docs/images/mlflow_comparison.png)
+![Accuracy vs latency](reports/extractor_comparison.png)
 
 ### 7. Reliability
 - Every service restarts by itself after a reboot; the API keeps retrying until the model is
