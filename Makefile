@@ -1,5 +1,5 @@
 .RECIPEPREFIX = >
-.PHONY: help venv lock test lint ingest features train compare predict drift up up-monitoring down logs train-dag clean-docker
+.PHONY: help venv lock test lint ingest features train compare taxa-stats predict drift up up-monitoring mlflow-local down logs train-dag clean-docker
 
 PY ?= uv run python
 IMG ?=
@@ -18,7 +18,7 @@ test:            ## unit tests (no network, no model weights needed)
 > $(PY) -m pytest -q
 
 lint:            ## flake8
-> $(PY) -m flake8 src tests airflow streamlit_app --max-line-length=127
+> $(PY) -m flake8 src tests airflow streamlit_app scripts --max-line-length=127
 
 ingest:          ## download openly licensed research-grade photos from iNaturalist
 > $(PY) -m src.data.ingest
@@ -34,13 +34,16 @@ compare:         ## level 2: compare extractors in the Airflow container, in the
 > docker compose exec -d airflow bash -c "cd /opt/project && /opt/venv/bin/python -m src.models.train --compare $(EXTRACTORS) > reports/compare.log 2>&1"
 > @echo "Comparison started in the background. Follow it with: tail -f reports/compare.log"
 
+taxa-stats:      ## iNaturalist observation counts per species (evidence for the perimeter) -> reports/taxa_stats.md
+> docker compose exec airflow bash -c "cd /opt/project && /opt/venv/bin/python -m scripts.taxa_stats"
+
 predict:         ## make predict IMG=path/to/photo.jpg
 > $(PY) -m src.models.predict $(IMG)
 
 drift:           ## run the drift / production-performance check once
 > $(PY) -m src.monitoring.drift
 
-up:              ## build and start the core stack (postgres, mlflow, api, streamlit, airflow)
+up:              ## build and start the core stack (postgres, api, streamlit, airflow)
 > docker compose build airflow
 > docker compose build api
 > docker compose up -d --build
@@ -48,8 +51,11 @@ up:              ## build and start the core stack (postgres, mlflow, api, strea
 up-monitoring:   ## add Prometheus + Grafana
 > docker compose --profile monitoring up -d
 
+mlflow-local:    ## offline fallback: local MLflow on :5000 (set MLFLOW_TRACKING_URI=http://mlflow:5000 in .env to use it)
+> docker compose --profile local-mlflow up -d mlflow
+
 down:            ## stop the stack (volumes kept)
-> docker compose --profile monitoring down
+> docker compose --profile monitoring --profile local-mlflow down
 
 logs:
 > docker compose logs -f --tail=100

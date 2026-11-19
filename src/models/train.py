@@ -27,6 +27,7 @@ from src.features import extract
 from src.models import conformal
 
 log = logging.getLogger("train")
+CHALLENGER_ALIAS = "challenger"  # the latest candidate that did not beat the champion
 
 
 def dataset_version() -> str:
@@ -107,6 +108,24 @@ def benchmark(extractor_name: str, head, image_paths: list[str], pretrained: boo
             "embedding_dim": ex.dim}
 
 
+def log_per_species(y_true, y_pred, classes):
+    """Per-species F1 as metrics (chartable in MLflow) and a confusion-matrix image."""
+    import matplotlib
+    matplotlib.use("Agg")  # no display on servers
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import ConfusionMatrixDisplay
+
+    f1s = f1_score(y_true, y_pred, labels=classes, average=None, zero_division=0)
+    mlflow.log_metrics({f"test_f1_{c.replace(' ', '_')}": float(f) for c, f in zip(classes, f1s)})
+    fig, ax = plt.subplots(figsize=(9, 8))
+    ConfusionMatrixDisplay.from_predictions(y_true, y_pred, labels=classes, ax=ax, colorbar=False,
+                                            xticks_rotation=45, cmap="Blues")
+    ax.set_title("Confusion matrix on the test set")
+    fig.tight_layout()
+    mlflow.log_figure(fig, "confusion_matrix.png")
+    plt.close(fig)
+
+
 def champion_info(client: MlflowClient):
     try:
         mv = client.get_model_version_by_alias(config.REGISTERED_MODEL, config.CHAMPION_ALIAS)
@@ -162,7 +181,9 @@ def train(extractor_name: str | None = None, promote: bool = True, pretrained: b
         if bench_images:
             metrics.update(benchmark(extractor_name, head, test_paths[:bench_images], pretrained))
         mlflow.log_metrics(metrics)
-        mlflow.log_text(classification_report(y_te, head.predict(X_te), zero_division=0), "classification_report.txt")
+        y_pred = head.predict(X_te)
+        mlflow.log_text(classification_report(y_te, y_pred, zero_division=0), "classification_report.txt")
+        log_per_species(y_te, y_pred, classes)
 
         # Attribution travels with the model: every training image's author and license.
         mlflow.log_text(meta[["photo_id", "taxon_name", "license_code", "attribution", "url"]].to_csv(index=False),
@@ -206,6 +227,8 @@ def promote_if_better(run_id, head, extractor_name, classes, X_te, y_te, metrics
                                  f"{'promoted' if promoted else 'rejected'} ({reason})")
     if promoted:
         client.set_registered_model_alias(config.REGISTERED_MODEL, config.CHAMPION_ALIAS, version.version)
+    else:  # kept for inspection or a later shadow test; the next rejected candidate replaces it
+        client.set_registered_model_alias(config.REGISTERED_MODEL, CHALLENGER_ALIAS, version.version)
     log.info("version %s %s (%s)", version.version, "PROMOTED" if promoted else "not promoted", reason)
     return promoted
 

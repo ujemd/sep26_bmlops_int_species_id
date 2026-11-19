@@ -1,5 +1,7 @@
 # Full stack on one VM. `make up` starts the core (~2.5 GB RAM idle, ~3.5 GB while training);
 # `make up-monitoring` adds Prometheus + Grafana (~0.3 GB). On a 4 GB VM, add swap first.
+# Experiments and models are tracked on DagsHub (MLFLOW_TRACKING_URI in .env). The local MLflow
+# server is an offline fallback, started only by hand: `make mlflow-local`.
 # Every service restarts by itself after a reboot if it was running when the VM stopped
 # (`restart: unless-stopped`); `make down` stops them for good until the next `make up`.
 x-common-env: &common-env
@@ -33,6 +35,7 @@ services:
   mlflow:
     build: {context: ., dockerfile: docker/mlflow.Dockerfile}
     image: ${DOCKERHUB_USER:-local}/species-mlflow:latest
+    profiles: [local-mlflow]
     restart: unless-stopped
     command: >
       mlflow server --host 0.0.0.0 --port 5000
@@ -48,7 +51,7 @@ services:
     restart: unless-stopped
     environment: *common-env
     ports: ["8000:8000"]
-    depends_on: {postgres: {condition: service_healthy}, mlflow: {condition: service_started}}
+    depends_on: {postgres: {condition: service_healthy}}
 
   streamlit:
     build: {context: ., dockerfile: docker/streamlit.Dockerfile}
@@ -83,7 +86,7 @@ services:
     volumes:
       - .:/opt/project          # code, params.yaml, data/ (DVC-tracked), DAGs
     ports: ["8080:8080"]
-    depends_on: {postgres: {condition: service_healthy}, mlflow: {condition: service_started}}
+    depends_on: {postgres: {condition: service_healthy}}
 
   prometheus:
     image: prom/prometheus:v2.55.1
