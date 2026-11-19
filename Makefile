@@ -3,6 +3,7 @@
 
 PY ?= uv run python
 IMG ?=
+EXTRACTORS ?= mobilenetv3_large_100 efficientnet_b0 resnet50
 
 help:            ## list targets
 > @grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -28,8 +29,10 @@ features:        ## embed new photos with the frozen extractor
 train:           ## train, log to MLflow, promote if better than the champion
 > $(PY) -m src.models.train
 
-compare:         ## level 2: same protocol, three extractors, cost vs accuracy table
-> $(PY) -m src.models.train --compare mobilenetv3_large_100 efficientnet_b0 resnet50
+compare:         ## level 2: compare extractors in the Airflow container, in the background (log: reports/compare.log)
+> @mkdir -p reports
+> docker compose exec -d airflow bash -c "cd /opt/project && /opt/venv/bin/python -m src.models.train --compare $(EXTRACTORS) > reports/compare.log 2>&1"
+> @echo "Comparison started in the background. Follow it with: tail -f reports/compare.log"
 
 predict:         ## make predict IMG=path/to/photo.jpg
 > $(PY) -m src.models.predict $(IMG)

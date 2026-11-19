@@ -117,7 +117,7 @@ def champion_info(client: MlflowClient):
 
 
 def train(extractor_name: str | None = None, promote: bool = True, pretrained: bool = True,
-          bench_images: int = 20) -> dict:
+          bench_images: int = 20, experiment: str | None = None) -> dict:
     prm = config.params()
     p, s = prm["train"], prm["serve"]
     extractor_name = extractor_name or prm["features"]["extractor"]
@@ -139,14 +139,14 @@ def train(extractor_name: str | None = None, promote: bool = True, pretrained: b
     log.info("test photos per species: %s", pd.Series(y_te).value_counts().to_dict())
 
     mlflow.set_tracking_uri(config.MLFLOW_TRACKING_URI)
-    mlflow.set_experiment(config.MLFLOW_EXPERIMENT)
+    mlflow.set_experiment(experiment or config.MLFLOW_EXPERIMENT)
     with mlflow.start_run(run_name=f"{extractor_name}-{time.strftime('%Y%m%d-%H%M')}") as run:
         mlflow.log_params({"extractor": extractor_name, "n_classes": len(set(y)), "n_train": len(y_tr),
                            "n_calib": len(y_cal), "n_test": len(y_te), "C": p["C"], "alpha": s["alpha"],
                            "min_confidence": s["min_confidence"],
                            "split": "stratified, by observation order within each species"})
         mlflow.set_tags({"dataset_version": dataset_version(), "features_version": dvc_hash("processed"),
-                         "pretrained": pretrained})
+                         "pretrained": pretrained, "purpose": "pipeline" if promote else "experiment"})
 
         t0 = time.perf_counter()
         head = make_pipeline(StandardScaler(), LogisticRegression(
@@ -210,12 +210,44 @@ def promote_if_better(run_id, head, extractor_name, classes, X_te, y_te, metrics
     return promoted
 
 
+COMPARISON_COLUMNS = {  # metric -> (column title, format)
+    "test_macro_f1": ("macro F1", "{:.3f}"),
+    "f1_gain_vs_baseline": ("F1 gain vs baseline", "{:+.3f}"),
+    "test_auto_accuracy": ("auto accuracy", "{:.1%}"),
+    "test_review_rate": ("review rate", "{:.1%}"),
+    "test_conformal_coverage": ("coverage", "{:.1%}"),
+    "latency_ms_p50": ("latency p50 (ms)", "{:.0f}"),
+    "latency_ms_p95": ("latency p95 (ms)", "{:.0f}"),
+    "latency_x_baseline": ("latency vs baseline", "×{:.1f}"),
+    "params_millions": ("params (M)", "{:.1f}"),
+    "weights_mb": ("weights (MB)", "{:.0f}"),
+}
+
+
+def comparison_table(df: pd.DataFrame) -> str:
+    """Markdown table, ready to paste into the README."""
+    head = "| extractor | " + " | ".join(title for title, _ in COMPARISON_COLUMNS.values()) + " |"
+    rows = [head, "|---" * (len(COMPARISON_COLUMNS) + 1) + "|"]
+    for name, r in df.iterrows():
+        cells = [fmt.format(r[col]) for col, (_, fmt) in COMPARISON_COLUMNS.items()]
+        rows.append(f"| `{name}` | " + " | ".join(cells) + " |")
+    return "\n".join(rows) + "\n"
+
+
 def compare(extractors: list[str]) -> pd.DataFrame:
-    rows = [{"extractor": e, **train(e, promote=False)} for e in extractors]
-    df = pd.DataFrame(rows)
+    """Same data, split, head and metrics for each extractor; nothing is registered or promoted.
+    The first extractor is the baseline that the others must justify their extra cost against."""
+    experiment = f"{config.MLFLOW_EXPERIMENT}-comparison"
+    rows = [{"extractor": e, **train(e, promote=False, experiment=experiment)} for e in extractors]
+    df = pd.DataFrame(rows).set_index("extractor")
+    base = df.iloc[0]
+    df["f1_gain_vs_baseline"] = df.test_macro_f1 - base.test_macro_f1
+    df["latency_x_baseline"] = df.latency_ms_p50 / base.latency_ms_p50
     config.REPORTS_DIR.mkdir(exist_ok=True)
-    df.to_csv(config.REPORTS_DIR / "extractor_comparison.csv", index=False)
-    print(df[["extractor", "test_macro_f1", "test_review_rate", "latency_ms_p50", "weights_mb"]].to_string())
+    df.to_csv(config.REPORTS_DIR / "extractor_comparison.csv")
+    table = comparison_table(df)
+    (config.REPORTS_DIR / "extractor_comparison.md").write_text(table)
+    print(table)
     return df
 
 
