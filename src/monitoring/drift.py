@@ -25,13 +25,17 @@ log = logging.getLogger("drift")
 
 
 def recent_predictions(days: int) -> pd.DataFrame:
+    """Predictions of the last `days` days, each distinct image counted once (its latest prediction)."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
     with session() as s:
         rows = s.execute(select(Prediction).where(Prediction.created_at >= since)).scalars().all()
-    return pd.DataFrame([{"id": r.id, "confidence": r.confidence, "needs_review": r.needs_review,
-                          "predicted": r.predicted_taxon,
-                          "embedding": np.frombuffer(r.embedding, dtype=np.float16).astype(np.float32)}
-                         for r in rows if r.embedding])
+    df = pd.DataFrame([{"id": r.id, "image_sha256": r.image_sha256, "confidence": r.confidence,
+                        "needs_review": r.needs_review, "predicted": r.predicted_taxon,
+                        "embedding": np.frombuffer(r.embedding, dtype=np.float16).astype(np.float32)}
+                       for r in rows if r.embedding])
+    if df.empty:
+        return df
+    return df.sort_values("id").drop_duplicates(subset="image_sha256", keep="last").reset_index(drop=True)
 
 
 def feedback_accuracy(days: int) -> tuple[float | None, int]:
