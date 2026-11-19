@@ -12,10 +12,20 @@ iNaturalist photos, versions them, retrains, compares, deploys and monitors the 
 
 ## Results at a glance
 
-Ten species, about 240 photos each, CPU only (2 vCPUs, 3.8 GB RAM).
+Champion model v3: ten species, 3,299 photos (about 330 each, ~500 in the test set), CPU only
+(2 vCPUs, 3.8 GB RAM).
 
 | Objective | Metric | Target | Measured |
 |---|---|---|---|
+| Answer most users without a human | review rate | ≤ 25% | **10.0%** ✅ |
+| Be right when answering alone | auto accuracy | ≥ 95% | **96.0%** ✅ |
+| Overall model quality | macro F1 (test set) | ≥ 0.85 | **0.914** ✅ |
+| Honest uncertainty | conformal coverage | ≥ 90% (alpha = 0.10) | **86.8%** ≈ (±2 points of sampling noise on ~500 photos) |
+| Few false alarms on normal photos | out-of-scope flag rate | ≈ 1% | **1.6%** ✅ |
+| Fast enough for interactive use | p95 latency of one prediction (CPU) | ≤ 300 ms | **55 ms** ✅ |
+| Keep the model fresh without manual work | retraining | weekly, or on drift / alert | ✅ automated |
+
+---|---|---|---|
 | Answer most users without a human | review rate | ≤ 25% | **5.6%** ✅ |
 | Be right when answering alone | auto accuracy | ≥ 95% | **94.8%** ≈ |
 | Overall model quality | macro F1 (test set) | ≥ 0.85 | **0.929** ✅ |
