@@ -12,6 +12,28 @@ from airflow.operators.bash import BashOperator
 
 RUN = "cd /opt/project && /opt/venv/bin/python -m "
 
+# Version the photos and embeddings with DVC, then upload them to the remote (DagsHub).
+# Uploads can fail transiently (network, remote busy): `dvc push` is retried three times,
+# without -q so that errors show up in the task log.
+VERSION_DATA = """
+set -e
+cd /opt/project
+export PATH=/opt/venv/bin:$PATH
+[ -d .dvc ] || dvc init --no-scm -q
+dvc config cache.type hardlink,symlink
+dvc add data/raw data/processed -q
+if [ -z "$(dvc remote list)" ]; then
+  echo "no DVC remote configured, skipping push"
+  exit 0
+fi
+for attempt in 1 2 3; do
+  if dvc push; then exit 0; fi
+  echo "dvc push failed (attempt $attempt of 3), retrying in 60 s"
+  sleep 60
+done
+exit 1
+"""
+
 with DAG(
     dag_id="species_training",
     start_date=datetime(2026, 1, 1),
@@ -23,15 +45,8 @@ with DAG(
 ) as dag:
     ingest = BashOperator(task_id="ingest", bash_command=RUN + "src.data.ingest")
     features = BashOperator(task_id="extract_features", bash_command=RUN + "src.features.extract")
-    version_data = BashOperator(
-        task_id="version_data",
-        bash_command=(
-            "cd /opt/project && export PATH=/opt/venv/bin:$PATH && "
-            "([ -d .dvc ] || dvc init --no-scm -q) && dvc config cache.type hardlink,symlink && "
-            "dvc add data/raw data/processed -q && "
-            "(if [ -n \"$(dvc remote list)\" ]; then dvc push -q; else echo 'no DVC remote, skipping push'; fi)"
-        ),
-    )
+    version_data = BashOperator(task_id="version_data", bash_command=VERSION_DATA,
+                                execution_timeout=timedelta(minutes=45))
     train = BashOperator(task_id="train", bash_command=RUN + "src.models.train")
     # Idempotent: the API reloads whatever version holds the "champion" alias.
     reload_api = BashOperator(
