@@ -19,29 +19,33 @@ data:
   allowed_licenses: [cc0, cc-by, cc-by-nc, cc-by-sa, cc-by-nc-sa]
   open_data_host: inaturalist-open-data.s3.amazonaws.com
   photo_size: medium            # ~500 px long side, ~60 KB
+  start_date: "2025-01-01"      # only observations uploaded after this date
   first_run_per_taxon: 150      # images per taxon on the first ingestion
   increment_per_taxon: 30       # new images per taxon on each scheduled run
   max_per_taxon: 400            # hard cap to protect the disk
-  start_date: "2025-01-01"      # only observations uploaded after this date
 
 features:
-  extractor: mobilenetv3_large_100   # comparison candidates: efficientnet_b0, resnet50, vit_small_patch14_dinov2.lvd142m
+  # Kept after the comparison (reports/extractor_comparison.md): efficientnet_b0 and resnet50
+  # were 1.8x and 6.7x slower for no significant F1 gain.
+  extractor: mobilenetv3_large_100
   image_size: 224
   batch_size: 32
 
 train:
-  min_images_per_class: 20
   seed: 42
   test_size: 0.15
   calib_size: 0.15
   C: 1.0
   max_iter: 2000
   min_macro_f1: 0.60          # a model below this is never promoted
+  min_images_per_class: 20    # smaller classes are left out of training
 
 serve:
   alpha: 0.10                 # conformal error rate: prediction sets cover the truth >= 90% of the time
   min_confidence: 0.50        # below this top-1 probability, always ask a human
   top_k: 3
+  ood_k: 5                    # out-of-scope detector: distance to the 5 nearest training photos
+  ood_quantile: 0.99          # threshold flags ~1% of normal photos, and photos unlike any training photo
 
 monitoring:
   drift_window_days: 7

@@ -11,7 +11,7 @@ import time
 import numpy as np
 
 from src import config
-from src.models import conformal
+from src.models import conformal, ood
 
 log = logging.getLogger("predict")
 
@@ -50,12 +50,16 @@ class Predictor:
         qhat, min_conf = self.meta["qhat"], self.meta["min_confidence"]
         order = np.argsort(probs)[::-1]
         pset = [self.classes[i] for i in order if probs[i] >= 1 - qhat]
+        distance, flag = ood.check(self.head, emb)
+        out_of_scope = bool(flag[0]) if flag is not None else False
         return {
             "taxon": self.classes[order[0]],
             "confidence": float(probs[order[0]]),
             "top_k": [{"taxon": self.classes[i], "probability": float(probs[i])} for i in order[: self.top_k]],
             "prediction_set": pset,
-            "needs_human_review": conformal.needs_review(probs, qhat, min_conf),
+            "needs_human_review": out_of_scope or conformal.needs_review(probs, qhat, min_conf),
+            "out_of_scope": out_of_scope,  # unlike any training photo: probably not one of our species
+            "ood_score": float(distance[0]) if distance is not None else None,
             "model_version": self.version,
             "latency_ms": (time.perf_counter() - t0) * 1000,
             "_embedding": emb[0],

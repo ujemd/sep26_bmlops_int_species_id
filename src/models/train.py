@@ -24,7 +24,7 @@ from sklearn.preprocessing import StandardScaler
 
 from src import config
 from src.features import extract
-from src.models import conformal
+from src.models import conformal, ood
 
 log = logging.getLogger("train")
 CHALLENGER_ALIAS = "challenger"  # the latest candidate that did not beat the champion
@@ -73,9 +73,12 @@ def evaluate(head, X, y, qhat, min_conf) -> dict:
     y_idx = np.array([classes.index(c) for c in y])
     sets = conformal.prediction_sets(probs, qhat)
     review = np.array([conformal.needs_review(r, qhat, min_conf) for r in probs])
+    _, out_of_scope = ood.check(head, X)
+    if out_of_scope is not None:
+        review = review | out_of_scope
     pred = np.array(classes)[probs.argmax(1)]
     auto = ~review
-    return {
+    metrics = {
         "accuracy": accuracy_score(y, pred),
         "macro_f1": f1_score(y, pred, average="macro"),
         "top3_accuracy": top_k_accuracy_score(y_idx, probs, k=min(3, len(classes)), labels=range(len(classes))),
@@ -85,6 +88,9 @@ def evaluate(head, X, y, qhat, min_conf) -> dict:
         # accuracy on what the service answers without a human: the number users actually experience
         "auto_accuracy": float((pred[auto] == y[auto]).mean()) if auto.any() else 0.0,
     }
+    if out_of_scope is not None:
+        metrics["ood_rate"] = float(out_of_scope.mean())  # in-scope photos wrongly flagged: ~1 - quantile
+    return metrics
 
 
 def benchmark(extractor_name: str, head, image_paths: list[str], pretrained: bool) -> dict:
@@ -162,8 +168,8 @@ def train(extractor_name: str | None = None, promote: bool = True, pretrained: b
     with mlflow.start_run(run_name=f"{extractor_name}-{time.strftime('%Y%m%d-%H%M')}") as run:
         mlflow.log_params({"extractor": extractor_name, "n_classes": len(set(y)), "n_train": len(y_tr),
                            "n_calib": len(y_cal), "n_test": len(y_te), "C": p["C"], "alpha": s["alpha"],
-                           "min_confidence": s["min_confidence"],
-                           "split": "stratified, by observation order within each species"})
+                           "min_confidence": s["min_confidence"], "ood_k": s["ood_k"],
+                           "ood_quantile": s["ood_quantile"], "split": "stratified, by observation order within each species"})
         mlflow.set_tags({"dataset_version": dataset_version(), "features_version": dvc_hash("processed"),
                          "pretrained": pretrained, "purpose": "pipeline" if promote else "experiment"})
 
@@ -176,14 +182,21 @@ def train(extractor_name: str | None = None, promote: bool = True, pretrained: b
         classes = list(head.classes_)
         qhat = conformal.calibrate(head.predict_proba(X_cal), np.array([classes.index(c) for c in y_cal]),
                                    s["alpha"])
+        bank, ood_threshold = ood.fit(X_tr, X_cal, s["ood_k"], s["ood_quantile"])
+        ood.attach(head, bank, ood_threshold, s["ood_k"])  # travels with the model
         metrics = {f"test_{k}": v for k, v in evaluate(head, X_te, y_te, qhat, s["min_confidence"]).items()}
-        metrics["qhat"] = qhat
+        metrics.update(qhat=qhat, ood_threshold=ood_threshold)
         if bench_images:
             metrics.update(benchmark(extractor_name, head, test_paths[:bench_images], pretrained))
         mlflow.log_metrics(metrics)
         y_pred = head.predict(X_te)
         mlflow.log_text(classification_report(y_te, y_pred, zero_division=0), "classification_report.txt")
         log_per_species(y_te, y_pred, classes)
+
+        # The exact data versions: `dvc pull` with these two files restores the photos and embeddings.
+        for pointer in ("raw.dvc", "processed.dvc"):
+            if (config.DATA_DIR / pointer).exists():
+                mlflow.log_artifact(str(config.DATA_DIR / pointer), artifact_path="data_version")
 
         # Attribution travels with the model: every training image's author and license.
         mlflow.log_text(meta[["photo_id", "taxon_name", "license_code", "attribution", "url"]].to_csv(index=False),

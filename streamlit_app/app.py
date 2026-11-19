@@ -28,7 +28,10 @@ if upload:
         right.error(r.json().get("detail", r.text))
         st.stop()
     out = r.json()
-    if out["needs_human_review"]:
+    if out.get("out_of_scope"):
+        right.error(f"This photo does not look like any of the {len(classes)} species the model knows "
+                    f"(closest guess: {out['taxon']}). Sent to human review.")
+    elif out["needs_human_review"]:
         right.warning(f"Uncertain: **{out['taxon']}** ({out['confidence']:.0%}). "
                       f"Sent to human review. Plausible species: {', '.join(out['prediction_set']) or 'none'}")
     else:
