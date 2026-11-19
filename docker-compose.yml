@@ -1,5 +1,7 @@
 # Full stack on one VM. `make up` starts the core (~2.5 GB RAM idle, ~3.5 GB while training);
 # `make up-monitoring` adds Prometheus + Grafana (~0.3 GB). On a 4 GB VM, add swap first.
+# Every service restarts by itself after a reboot if it was running when the VM stopped
+# (`restart: unless-stopped`); `make down` stops them for good until the next `make up`.
 x-common-env: &common-env
   DATABASE_URL: postgresql+psycopg2://species:${POSTGRES_PASSWORD:-species}@postgres:5432/species
   MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
@@ -15,6 +17,7 @@ x-common-env: &common-env
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: species
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-species}
@@ -30,6 +33,7 @@ services:
   mlflow:
     build: {context: ., dockerfile: docker/mlflow.Dockerfile}
     image: ${DOCKERHUB_USER:-local}/species-mlflow:latest
+    restart: unless-stopped
     command: >
       mlflow server --host 0.0.0.0 --port 5000
       --backend-store-uri postgresql://species:${POSTGRES_PASSWORD:-species}@postgres:5432/mlflow
@@ -41,14 +45,15 @@ services:
   api:
     build: {context: ., dockerfile: docker/api.Dockerfile}
     image: ${DOCKERHUB_USER:-local}/species-api:latest
+    restart: unless-stopped
     environment: *common-env
     ports: ["8000:8000"]
     depends_on: {postgres: {condition: service_healthy}, mlflow: {condition: service_started}}
-    restart: unless-stopped
 
   streamlit:
     build: {context: ., dockerfile: docker/streamlit.Dockerfile}
     image: ${DOCKERHUB_USER:-local}/species-streamlit:latest
+    restart: unless-stopped
     environment: {API_URL: "http://api:8000"}
     ports: ["8501:8501"]
     depends_on: [api]
@@ -56,6 +61,7 @@ services:
   airflow:
     build: {context: ., dockerfile: docker/airflow.Dockerfile}
     image: ${DOCKERHUB_USER:-local}/species-airflow:latest
+    restart: unless-stopped
     user: "${AIRFLOW_UID:-50000}:0"
     environment:
       <<: *common-env
@@ -72,7 +78,7 @@ services:
       AIRFLOW__SCHEDULER__PARSING_PROCESSES: "1"
       AIRFLOW__CORE__PARALLELISM: "2"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
-        # Keep the image's entrypoint: it registers the host UID as a user, which Airflow requires
+    # Keep the image's entrypoint: it registers the host UID as a user, which Airflow requires
     command: ["bash", "/opt/project/docker/airflow-start.sh"]
     volumes:
       - .:/opt/project          # code, params.yaml, data/ (DVC-tracked), DAGs
@@ -82,12 +88,14 @@ services:
   prometheus:
     image: prom/prometheus:v2.55.1
     profiles: [monitoring]
+    restart: unless-stopped
     volumes: [./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
     ports: ["9090:9090"]
 
   grafana:
     image: grafana/grafana:11.3.0
     profiles: [monitoring]
+    restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
       API_ADMIN_USER: ${API_ADMIN_USER:-admin}
