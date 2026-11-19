@@ -1,22 +1,14 @@
-# One-week roadmap
+# Roadmap, budgets and notes for the defense
 
-Each day is about **running the pipeline on real data, fixing what breaks, and capturing
-evidence** (screenshots, MLflow runs, Grafana panels) for the README and the defense.
-
-| Day | Goal | Done when | Course phase | Status |
-|---|---|---|---|---|
-| 1 | Local baseline on real data | ingestion and training run; MLflow shows a run with `test_auto_accuracy` | 1 | ✅ |
-| 2 | Stack in Docker | Streamlit → API → PostgreSQL works; the `predictions` table fills | 1–2 | ✅ |
-| 3 | Automated training | `species_training` DAG green end to end; DVC pushes to DagsHub; a second run shows a promote/reject decision tag | 2 | ✅ except DagsHub |
-| 4 | Monitoring | Grafana dashboard live; drift simulated with `scripts/simulate_traffic.py` and it triggers training; Grafana alert fires the webhook | 3 | ⏳ next |
-| 5 | Level 2 and CI/CD | extractor comparison table (accuracy vs latency vs size) in the README; GitHub Actions green; images on Docker Hub | 2 | CI/CD ✅, comparison ⏳ |
-| 6 | Polish | README screenshots and comparison table; optional k3s deployment of the API | 3 | ⏳ |
-| 7 | Buffer and rehearsal | 15 min presentation + 5 min demo, every member speaks | Defense | ⏳ |
-
-## If time is short, cut in this order
-1. k3s (keep the manifest, say it is untested).
-2. Grafana alert webhook (the drift DAG already closes the loop).
-3. Extractor comparison with three models: two are enough.
+| Day | Goal | Status |
+|---|---|---|
+| 1 | Local baseline on real data | ✅ |
+| 2 | Stack in Docker | ✅ |
+| 3 | Automated training: Airflow, DVC + DagsHub, champion/challenger promotion | ✅ |
+| 4 | Monitoring: daily collector, Evidently drift, Grafana dashboard and alert | ✅ |
+| 5 | Extractor comparison; CI/CD (GitHub Actions, Docker Hub) | ✅ |
+| 6 | README screenshots; optional k3s deployment of the API | ⏳ |
+| 7 | Rehearsal: 15 min presentation + 5 min demo, every member speaks | ⏳ |
 
 ## Memory budget (3.8 GB RAM VM)
 
@@ -25,68 +17,87 @@ evidence** (screenshots, MLflow runs, Grafana panels) for the README and the def
 | Airflow (scheduler + 1 webserver worker) | ~1.0 GB |
 | Training task (extractor + images in batches) | ~1.0 GB peak |
 | API (torch + model) | ~0.5 GB |
-| MLflow, PostgreSQL, Streamlit | ~0.5 GB |
+| PostgreSQL, Streamlit | ~0.3 GB |
 | Prometheus + Grafana (`make up-monitoring`) | ~0.3 GB |
 
 Before the first `make up` on the course VM:
-- stop k3s until the scaling step: `sudo systemctl disable k3s && sudo /usr/local/bin/k3s-killall.sh`
+- stop k3s until it is needed: `sudo systemctl disable k3s && sudo /usr/local/bin/k3s-killall.sh`
   (back with `sudo systemctl enable --now k3s`);
-- add a 4 GB swap file with `vm.swappiness=10`, so build and training peaks spill to disk
-  instead of getting killed.
+- add a 4 GB swap file with `vm.swappiness=10`.
+
+Heavy jobs (extractor comparison, image builds): stop Streamlit and Grafana first if RAM is short.
 
 ## Disk budget (29 GB disk)
 
 | Item | Approx. size |
 |---|---|
-| Docker images (API ~1.3 GB, Airflow ~3 GB, MLflow, Streamlit, Postgres, Grafana, Prometheus) | ~6.5 GB |
-| Local `.venv` and uv download cache | ~2 GB |
+| Docker images | ~6.5 GB |
+| Local `.venv` and uv cache | ~2 GB |
 | Swap file | 4 GB |
-| Photos: 10 taxa × 150–400 × ~60 KB | 0.1–0.25 GB |
-| DVC cache | ~0 (hardlinks, no copies) |
-| Build cache | grows: run `make clean-docker` after builds |
+| Photos and embeddings | ~0.3 GB |
+| DVC cache | ~0 (hardlinks) |
 
-Rebuilding images: stop the stack and remove the old project images first (`make down`, then
-`docker image rm` on the four `local/species-*` images), build one image at a time, and run
-`docker builder prune -f` after each build. Old and new images do not fit side by side.
-
-## Design notes for the remaining level 3–4 items (for the Q&A)
-
-**Label revisions.** On iNaturalist, a research-grade identification can change later. Plan:
-the ingestion job also re-reads stored observations with `updated_since=<last run>` and
-writes the change to a `label_revisions` table. A training photo whose label changed is relabelled
-before the next training run. Past predictions are never rewritten: the new truth is recorded as
-`feedback` with `source='inat'`, so production accuracy is recomputed against it, and the history
-stays auditable.
-
-**Active learning.** The review queue is ordered by the size of the conformal prediction set
-(largest first), then by lowest confidence. These are the photos where a human label is worth
-the most.
-
-**Rare species.** BioCLIP (via `open_clip`) can classify zero-shot from a text prompt with the
-species name. This is a possible fallback for a taxon with fewer than ~20 images.
+Rebuilding images: `make down`, remove the old `local/species-*` images, build one image at a time
+and run `docker builder prune -f` after each; old and new images do not fit side by side.
 
 ## Pending
 
-- [ ] **Calibrate `min_confidence`** on the calibration set: lowest threshold that keeps
-      auto-accuracy ≥ 95% (currently fixed at 0.5 by hand; only matters when `qhat > 0.5`).
-- [ ] **Security checklist** (before the defense):
-      strong passwords in `.env`; remove the `admin` / `change-me` fallbacks in `docker-compose.yml`
-      and `src/config.py`; Kubernetes Secret for k3s; one Docker Hub token per project.
-- [ ] Extractor comparison (`make compare`), results table in the README.
-- [ ] DagsHub remote for DVC and MLflow.
-- [ ] Taxa justification with iNaturalist counts (`scripts/taxa_stats.py`) in the README.
+- [ ] **Promotion tolerance:** promote when the new model is at most 0.01 F1 below the champion
+      (differences of a few thousandths are noise; today a tie or noise blocks promotion).
+- [ ] **Calibrate `min_confidence`** on the calibration set (fixed at 0.5 by hand; redundant
+      while `qhat < 0.5`).
+- [ ] **Use feedback for training:** add corrected photos to the training data after a quality
+      check (requires storing the images of predictions).
+- [ ] **Review queue:** store flagged images, show them to reviewers ordered by uncertainty.
+- [ ] **Shadow test of the challenger** on live traffic before promotion.
+- [ ] **k3s deployment** of the API (manifest in `k8s/api.yaml`, images on Docker Hub).
+- [ ] **CI check** that committed `.dvc` pointers exist on the remote (`dvc status -c`).
+- [ ] **Security checklist:** strong passwords in `.env` (PostgreSQL also needs `ALTER USER`);
+      remove the `admin` / `change-me` fallbacks; Kubernetes Secret; one token per project.
+
+## Design notes for the remaining items (Q&A)
+
+**Label revisions.** A research-grade identification can change later. The ingestion job would
+re-read stored observations with `updated_since=<last run>` and record changes in a
+`label_revisions` table. Training photos are relabelled before the next run; past predictions are
+never rewritten: the new truth is added as feedback (`source='inat'`), so production accuracy is
+recomputed and the history stays auditable.
+
+**Photos that disappear or change license.** The same job checks stored photos (HTTP `HEAD`,
+license field) and marks them `unavailable` or `license_revoked`; the next training run and the
+next DVC version exclude them. A revoked license means models trained on that photo must be
+retrained without it.
+
+**Active learning.** Order the review queue by prediction-set size, then by lowest confidence,
+then by out-of-scope distance: these are the photos where a human label is worth the most.
+
+**Rare species.** BioCLIP (via `open_clip`) classifies zero-shot from the species name: a fallback
+for taxa with fewer than ~20 photos.
 
 ## Notes for the defense
 
-- **Images vs embeddings:** training only needs embeddings, but images are kept (DVC) to change
-  the extractor, reproduce embeddings, benchmark real latency and produce visual explanations.
-  At scale, the DVC remote is the source of truth and machines pull only what they need.
-- **Licenses:** CC0, BY, BY-SA, BY-NC, BY-NC-SA kept; ND excluded (no derivatives). Attribution
-  travels with the data in `metadata.csv`. NC is fine for a course project.
-- **Split:** stratified *and* stable. Photos are ranked by observation id within each species and
-  every block of 20 gets fixed slots (14 / 3 / 3). Ingestion only appends newer observations, so a
-  photo never changes part and the champion comparison stays fair; a new species with 20 photos
-  still gets 3 test photos.
-- **Taxa:** common, well-represented, several kingdoms; North American bias of iNaturalist users.
-- **Extractor:** MobileNetV3 as the cheap baseline; bigger models must justify their cost.
-- **Environment:** one `uv.lock` for local, CI and every image; each image installs only its group.
+- **Extractor:** MobileNetV3 kept; ResNet-50 is 6.7× slower for +0.003 F1 (noise). The extractor
+  is not the bottleneck at ~0.93 F1.
+- **Two reasons to ask a human:** conformal sets (the model hesitates between species) and the
+  out-of-scope detector (the photo is unlike anything in training). Softmax alone answers
+  confidently for a cat; conformal guarantees assume in-distribution photos.
+- **Look-alikes:** the viceroy is predicted as a monarch; only adding it to the perimeter fixes it.
+- **Split:** stratified and stable (blocks of 20 by observation order); a photo never changes part,
+  so the champion comparison stays fair.
+- **Data versions:** MLflow records which data each model used (hashes + `.dvc` files); the DVC
+  remote keeps every version; Git holds a convenient snapshot of the latest one.
+- **Images vs metadata only:**
+
+  | | Metadata + embeddings only | Metadata + photos (current) |
+  |---|---|---|
+  | Storage | tiny | ~60 KB per photo |
+  | Retrain the head | ✅ | ✅ |
+  | Change the extractor | ❌ re-download everything | ✅ |
+  | Exact reproducibility | ❌ photos can be deleted or relicensed | ✅ |
+
+- **Monitoring without users:** the daily collector sends fresh, community-labelled photos through
+  the API, so drift and accuracy are measured on real, recent data.
+- **Licenses:** CC0, BY, BY-SA, BY-NC, BY-NC-SA kept; ND excluded. Attribution travels with the
+  data and with every model.
+- **Security:** course-grade on purpose; the checklist above is what a real deployment needs.
+- **Manual promotion:** used twice, both recorded with their reason in the `decision` tag.

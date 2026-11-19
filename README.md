@@ -1,25 +1,27 @@
 # Species identification from photographs: an MLOps pipeline
 
-A service that identifies a species from a photograph and returns a confidence level. When the
-model is not sure enough, it refers the observation to a human. Around it sits an automated
-pipeline that ingests openly licensed iNaturalist photos, versions them, retrains, compares,
-deploys and monitors the model.
+A service that identifies a species from a photograph and returns a calibrated confidence. When the
+model is unsure, or when the photo does not look like anything it was trained on, it refers the
+observation to a human. Around it runs an automated pipeline that ingests openly licensed
+iNaturalist photos, versions them, retrains, compares, deploys and monitors the model.
 
 > **Principle of the project:** the model is deliberately simple (a frozen pre-trained extractor
 > plus a logistic regression); the work is in the production chain around it.
 
 ---
 
-## Objectives and metrics
+## Results at a glance
 
-| Objective | Metric | Target |
-|---|---|---|
-| Answer most users without a human | review rate | ≤ 25% |
-| Be right when answering alone | auto accuracy | ≥ 95% |
-| Overall model quality | macro F1 on the test set | ≥ 0.85 (never promote below 0.60) |
-| Honest uncertainty | conformal coverage | ≥ 90% (alpha = 0.10) |
-| Fast enough for interactive use | p95 latency of /predict on CPU | ≤ 300 ms |
-| Keep the model fresh without manual work | retraining | weekly, or on drift/alert |
+Ten species, about 240 photos each, CPU only (2 vCPUs, 3.8 GB RAM).
+
+| Objective | Metric | Target | Measured |
+|---|---|---|---|
+| Answer most users without a human | review rate | ≤ 25% | **5.6%** ✅ |
+| Be right when answering alone | auto accuracy | ≥ 95% | **94.8%** ≈ |
+| Overall model quality | macro F1 (test set) | ≥ 0.85 | **0.929** ✅ |
+| Honest uncertainty | conformal coverage | ≥ 90% (alpha = 0.10) | **89.5%** ≈ (within sampling noise) |
+| Fast enough for interactive use | p95 latency of one prediction (CPU) | ≤ 300 ms | **81 ms** ✅ |
+| Keep the model fresh without manual work | retraining | weekly, or on drift / alert | ✅ automated |
 
 ---
 
@@ -32,114 +34,174 @@ flowchart LR
         S3[(AWS open-data bucket<br/>openly licensed photos)]
     end
 
-    subgraph Training["Training pipeline (Airflow, weekly or on alert)"]
-        ING[ingest<br/>license filter + attribution] --> FEAT[extract_features<br/>frozen timm backbone]
-        FEAT --> DVC[version_data<br/>DVC → DagsHub]
-        DVC --> TRAIN[train<br/>LogReg head + conformal calibration]
-        TRAIN --> PROMO{better than<br/>champion?}
+    subgraph Training["Training pipeline: Airflow, weekly or on demand"]
+        ING[ingest<br/>license filter + attribution] --> FEAT[extract_features<br/>frozen MobileNetV3]
+        FEAT --> VER[version_data<br/>dvc add + dvc push]
+        VER --> TRAIN[train<br/>logistic regression<br/>conformal + out-of-scope detector]
+        TRAIN --> PROMO{beats the<br/>champion?}
         PROMO -- yes --> RELOAD[reload API]
     end
 
-    subgraph Serving["Prediction pipeline (real time)"]
-        UI[Streamlit] --> API[FastAPI /predict]
+    subgraph Monitoring["Monitoring: Airflow, daily"]
+        COLL[collect_drift_data<br/>fresh photos + true species] --> DRIFT[Evidently drift<br/>+ production accuracy]
+    end
+
+    subgraph Serving["Serving: real time"]
+        UI[Streamlit] --> API[FastAPI]
         API --> PG[(PostgreSQL<br/>predictions + feedback)]
     end
 
-    subgraph Monitoring
-        PROM[Prometheus] --> GRAF[Grafana<br/>dashboard + alert]
-        DRIFT[monitoring DAG<br/>Evidently on embeddings]
+    subgraph DagsHub
+        MLF[(MLflow<br/>runs + model registry)]
+        REM[(DVC remote<br/>photos + embeddings)]
     end
 
     INAT --> ING
     S3 --> ING
-    TRAIN <--> MLF[(MLflow<br/>tracking + registry)]
+    INAT --> COLL
+    VER --> REM
+    TRAIN <--> MLF
     API -- loads @champion --> MLF
-    API -- /metrics --> PROM
-    GRAF -- webhook --> API
-    API -- /train --> Training
+    COLL -- /predict + /feedback --> API
     PG --> DRIFT
     DRIFT -- drift or accuracy drop --> Training
+    API -- /metrics --> PROM[Prometheus] --> GRAF[Grafana]
+    GRAF -- alert webhook --> API
+    API -- /train --> Training
 ```
+
+![Training pipeline in Airflow](docs/images/airflow_training_dag.png)
 
 | Service | Port | Role |
 |---|---|---|
-| `api` | 8000 | FastAPI: `/predict`, `/feedback`, `/train`, `/reload`, `/metrics`; documentation at `/docs` and `/redoc` |
+| `api` | 8000 | FastAPI: `/predict`, `/feedback`, `/model`, `/health`, `/metrics`; admin `/train`, `/reload`; docs at `/docs` |
 | `streamlit` | 8501 | User interface: upload a photo, see the answer, correct it |
 | `airflow` | 8080 | `species_training` (weekly) and `species_monitoring` (daily) DAGs |
-| `mlflow` | 5000 | Experiment tracking and model registry (alias `champion`) |
-| `postgres` | 5432 | Training metadata, predictions, feedback; MLflow and Airflow back ends |
-| `prometheus` | 9090 | Scrapes API metrics |
-| `grafana` | 3000 | Dashboard and the alert that triggers retraining |
+| `postgres` | 5432 | Training metadata, predictions, feedback; Airflow back end |
+| `prometheus`, `grafana` | 9090, 3000 | Service metrics, dashboard, and the alert that triggers retraining (`make up-monitoring`) |
+| DagsHub | (hosted) | MLflow tracking and model registry; DVC remote storage |
+| `mlflow` | 5000 | Offline fallback only, started by hand (`make mlflow-local`) |
 
 ---
 
 ## How it works
 
 ### 1. Data: open licenses and attribution
-`src/data/ingest.py` queries the iNaturalist API for **research-grade** observations of the taxa
-listed in `params.yaml`. It respects the 60 requests/minute limit and fetches only observations
-newer than the last one stored, so every scheduled run adds new data.
+`src/data/ingest.py` queries the iNaturalist API for **research-grade** observations of the ten
+species listed in `params.yaml`. It respects the 60 requests/minute limit and only fetches
+observations newer than the last one stored, so every scheduled run adds 30 new photos per species
+(up to 400).
 
 A photo is kept only if **both** conditions hold:
-- its license is in `allowed_licenses` (CC0, CC BY, CC BY-NC, CC BY-SA, CC BY-NC-SA; "no
-  derivatives" licenses are excluded);
-- it is hosted on `inaturalist-open-data.s3.amazonaws.com`. Photos on `static.inaturalist.org`
-  are not openly licensed and are rejected even if the metadata looks right.
+- its license is in `allowed_licenses` (CC0, CC BY, CC BY-NC, CC BY-SA, CC BY-NC-SA); "no
+  derivatives" licenses are excluded;
+- it is hosted on the AWS open-data bucket. Photos on `static.inaturalist.org` are not openly
+  licensed and are rejected.
 
-Observations identified to a subspecies are labelled with their species. The license code and the
-attribution string are stored for every photo (in PostgreSQL and in `data/raw/metadata.csv`). Each
-MLflow run also logs a `training_data_attribution.csv`, so a model can always be traced back to
-the authors of its training images.
+Observations identified to a subspecies are labelled with their species. The license and the
+author's attribution are stored for every photo (PostgreSQL and `data/raw/metadata.csv`), and each
+MLflow run logs a `training_data_attribution.csv`.
 
-> The full open-data metadata dump on S3 is 36 GB, too large for the project VM. Calling the API
-> for metadata is cheap: about 30 requests for 10 taxa.
+**Why these ten species:** common, from several kingdoms (insects, birds, a mammal, plants, a
+fungus), and very well represented: each has more than 118,000 openly licensed photos, while the
+pipeline uses at most 400 ([`reports/taxa_stats.md`](reports/taxa_stats.md)).
+
+| species | research-grade observations | openly licensed photos |
+|---|---|---|
+| *Danaus plexippus* | 544,952 | 406,266 |
+| *Apis mellifera* | 745,382 | 565,603 |
+| *Coccinella septempunctata* | 305,140 | 240,213 |
+| *Cardinalis cardinalis* | 356,529 | 271,490 |
+| *Turdus migratorius* | 428,811 | 331,049 |
+| *Anas platyrhynchos* | 924,921 | 728,518 |
+| *Sciurus carolinensis* | 402,536 | 315,522 |
+| *Taraxacum officinale* | 167,292 | 129,963 |
+| *Achillea millefolium* | 276,582 | 212,239 |
+| *Amanita muscaria* | 161,631 | 118,491 |
 
 ### 2. Model: frozen extractor, simple head
-- **Extractor:** `mobilenetv3_large_100` from `timm`, frozen. Embeddings are cached per photo and
-  versioned with DVC, so a retraining run only embeds new images.
+- **Extractor:** `mobilenetv3_large_100` from `timm`, frozen; 1,280-value embedding per photo.
+  Embeddings are cached and versioned, so a retraining run only embeds new photos.
 - **Head:** `StandardScaler` + `LogisticRegression(class_weight="balanced")`, saved as one sklearn
   pipeline. It trains in seconds on a CPU.
-- **Split:** train / calibration / test, **stratified and stable**. Within each species, photos are
-  ranked by observation id; every block of 20 consecutive photos gives 14 train, 3 calibration and
-  3 test (70 / 15 / 15 %), from the very first run. Ingestion only appends newer observations, so a
-  photo never changes part as the dataset grows: a new model and the champion are never evaluated
-  on photos the champion was trained on.
-- Species with fewer than `min_images_per_class` photos are left out of training, with a warning.
+- **Split: stratified and stable.** Within each species, photos are ranked by observation id; every
+  block of 20 gives 14 train, 3 calibration and 3 test photos. Ingestion only appends newer
+  observations, so a photo never changes part: a new model and the champion are never evaluated on
+  photos the champion was trained on.
 
-### 3. Confidence and human review: conformal prediction
-Following Angelopoulos & Bates (2021), the calibration split gives a threshold `qhat` such that the
-**prediction set** `{species : p ≥ 1 − qhat}` contains the true species at least 90% of the time
-(`alpha = 0.10`). The API asks for human review when:
-- the set holds more than one species (the model hesitates), or it is empty (nothing looks
-  familiar, which often means the photo is outside the perimeter); or
-- the top probability is below `min_confidence`.
+### 3. When to ask a human
+The API sends a photo to human review in two situations.
 
-The headline metric is therefore **`test_auto_accuracy`**: the accuracy of the answers the service
-gives *without* a human, together with the **`test_review_rate`**, the share it hands over.
+**The model hesitates: conformal prediction.** Following Angelopoulos & Bates (2021), the
+calibration split gives a threshold `qhat` such that the **prediction set**
+`{species : p ≥ 1 − qhat}` contains the true species at least 90% of the time. If the set holds
+more than one species, or the top probability is below `min_confidence`, the photo goes to review.
 
-### 4. Versioning and promotion
-- **Data:** `dvc add data/raw data/processed` (DVC without Git, as the course recommends), pushed
-  to a DagsHub remote. The DVC hashes are stored as the `dataset_version` and `features_version`
-  tags on every MLflow run.
-- **Model:** each run is registered in the MLflow registry. The new version gets the `champion`
-  alias only if it beats the current champion **on the same test set**, and it must also reach
-  `min_macro_f1`. The decision and its reason are written as a tag on the version.
-- **Deployment:** the API serves whatever version holds `champion`, and the DAG calls `/reload`
-  after training. Rolling back means moving the alias in the MLflow UI and calling `/reload`.
-- **Environment:** every Python package, including indirect dependencies, is pinned in `uv.lock`.
-  The same lock builds the local environment, CI and all Docker images.
+**The photo is outside the perimeter: out-of-scope detection.** A classifier always answers with
+one of its known species, even for a cat, and conformal guarantees only hold for photos like the
+training data. So the model also measures the distance from the photo to its 5 nearest training
+photos (Sun et al., 2022). The threshold is calibrated so that about 1% of normal photos are
+flagged; a photo unlike any training photo is flagged and sent to review.
+
+| Photo | Result |
+|---|---|
+| Monarch butterfly | ![confident answer](docs/images/streamlit_confident.png) |
+| Cat | ![out of scope](docs/images/streamlit_out_of_scope.png) |
+
+### 4. Versioning, comparison and promotion
+- **Data:** the pipeline runs `dvc add data/raw data/processed` (DVC without Git, as the course
+  recommends) and pushes to the DagsHub DVC remote, which keeps every version. Each MLflow run
+  stores the DVC hashes as tags (`dataset_version`, `features_version`) **and the two `.dvc` files
+  as artifacts** (`data_version/`): `dvc pull` with them restores the exact data of any model.
+- **Experiments:** every run logs its parameters, metrics (global and per species), a confusion
+  matrix, the classification report and the attribution file to the DagsHub MLflow.
+- **Registry:** every pipeline run registers a new version of `species-classifier`. The new
+  version gets the **`champion`** alias only if it scores at least as well as the current champion
+  **on the same test set**, and at least `min_macro_f1`. A rejected version gets the
+  **`challenger`** alias. Every decision and its reason are stored as a `decision` tag, including
+  manual promotions.
+- **Deployment:** the API always serves `models:/species-classifier@champion` and reloads it after
+  training. Rolling back = moving the alias and calling `/reload`.
+- **Environment:** every Python package, including indirect dependencies, is pinned in `uv.lock`;
+  the same lock builds the local environment, CI and all Docker images.
+
+![Model registry on DagsHub](docs/images/mlflow_registry.png)
 
 ### 5. Monitoring and the feedback loop
-- **Prometheus/Grafana:** request rate, p50/p95 latency, predictions per minute, review rate,
-  mean confidence, accuracy on feedback, and the model version in production.
-- **Alert:** if more than 50% of predictions over an hour need review, Grafana calls
-  `POST /webhooks/grafana`, which triggers the training DAG.
-- **Drift (Evidently, daily DAG):** this week's photo embeddings are compared with the training
-  embeddings, after projecting both onto 10 PCA components. If drift is detected, or the accuracy
-  on user corrections drops below 70%, the training DAG is triggered. The HTML report is logged in
-  MLflow.
-- **Feedback:** users correct a prediction in Streamlit (`POST /feedback`), and these labels feed
-  the production-accuracy metric.
+- **Production traffic without users:** every night, `collect_drift_data` sends 2 freshly
+  uploaded, openly licensed iNaturalist photos per species to `/predict`, then their
+  community-validated species to `/feedback`. Training photos are never reused.
+- **Drift (Evidently):** the last 7 days of photo embeddings are compared with the training
+  embeddings, on 10 PCA components. The HTML report is logged to MLflow.
+- **Accuracy in production:** computed from feedback (the collector's labels and user
+  corrections in Streamlit).
+- **Retraining triggers:** drift, accuracy below 70%, or the Grafana alert (more than 50% of
+  predictions sent to review over an hour) start the training pipeline.
+- **Grafana:** request rate, latency, predictions per minute, review rate, mean confidence,
+  accuracy on feedback, model version in production.
+
+![Grafana dashboard](docs/images/grafana_dashboard.png)
+
+### 6. Extractor comparison: accuracy vs cost
+Same photos, split, head and metrics for three extractors (`make compare`):
+
+| extractor | macro F1 | F1 gain vs baseline | auto accuracy | review rate | coverage | latency p50 (ms) | latency p95 (ms) | latency vs baseline | params (M) | weights (MB) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `mobilenetv3_large_100` | 0.929 | +0.000 | 94.8% | 5.6% | 89.5% | 52 | 81 | ×1.0 | 4.2 | 16 |
+| `efficientnet_b0` | 0.922 | -0.007 | 95.8% | 7.1% | 89.0% | 93 | 108 | ×1.8 | 4.0 | 15 |
+| `resnet50` | 0.932 | +0.003 | 95.8% | 6.8% | 89.3% | 348 | 390 | ×6.7 | 23.5 | 90 |
+
+**Decision: keep MobileNetV3.** ResNet-50 gains +0.003 F1, which is within noise on ~400 test
+photos, for 6.7× the latency, beyond the 300 ms target. EfficientNet-B0 is 1.8× slower for no gain.
+All three reach about 0.93: the extractor is not the bottleneck.
+
+![Accuracy vs latency](docs/images/mlflow_comparison.png)
+
+### 7. Reliability
+- Every service restarts by itself after a reboot; the API keeps retrying until the model is
+  reachable.
+- Uploads to the DVC remote are retried on transient errors; every Airflow task has a retry.
+- The API image bakes in the extractor weights: no download at start-up.
 
 ---
 
@@ -149,32 +211,54 @@ gives *without* a human, together with the **`test_review_rate`**, the share it 
 cp .env.example .env && echo "AIRFLOW_UID=$(id -u)" >> .env
 ```
 
+Add your DagsHub repository and token to `.env` (see `.env.example`):
+
+```
+MLFLOW_TRACKING_URI=https://dagshub.com/<user>/<repo>.mlflow
+MLFLOW_TRACKING_USERNAME=<user>
+MLFLOW_TRACKING_PASSWORD=<token>
+```
+
+Configure the DVC remote once (credentials go to `.dvc/config.local`, which Git ignores):
+
+```bash
+uv run dvc remote add -d origin https://dagshub.com/<user>/<repo>.dvc
+```
+
+```bash
+uv run dvc remote modify origin --local auth basic
+```
+
+```bash
+uv run dvc remote modify origin --local user <user>
+```
+
+```bash
+uv run dvc remote modify origin --local password <token>
+```
+
+Build and start the stack, then trigger the first training:
+
 ```bash
 make up
 ```
 
-The core stack needs about 3.5 GB of RAM while training. On a 4 GB VM, add 4 GB of swap first (see
-`docs/ROADMAP.md`). Prometheus and Grafana start separately, with `make up-monitoring`.
-
-Unpause the DAGs, then trigger the first training:
-
 ```bash
-docker compose exec airflow airflow dags unpause species_training
-```
-
-```bash
-docker compose exec airflow airflow dags unpause species_monitoring
+docker compose exec airflow airflow dags unpause species_training && docker compose exec airflow airflow dags unpause species_monitoring
 ```
 
 ```bash
 make train-dag
 ```
 
-Follow the run in Airflow at http://localhost:8080 (login `admin` / `admin`). The first run
-downloads about 1,500 photos (~90 MB) and trains in a few minutes on a CPU. When it finishes, open
-http://localhost:8501.
+Follow the run in Airflow (http://localhost:8080). When it finishes, open Streamlit
+(http://localhost:8501). Grafana and Prometheus: `make up-monitoring`.
 
-### Local development environment (tests, lint, quick experiments)
+> On a 4 GB VM, add 4 GB of swap and stop k3s first (see `docs/ROADMAP.md`). With several
+> machines on one DagsHub repository, only one should run `species_training`: they share a single
+> model registry.
+
+### Local development environment
 
 Install [uv](https://docs.astral.sh/uv/) once (`curl -LsSf https://astral.sh/uv/install.sh | sh`),
 then:
@@ -187,59 +271,51 @@ make venv
 make lint test
 ```
 
-`make venv` creates `.venv` from `uv.lock`, with Python 3.11 (the same version as CI and the Docker
-images), downloading it if needed. Run `make lint test` before every commit: CI runs the same
-checks. The same environment can run the pipeline outside Docker: `make ingest features train`,
-then `make predict IMG=path/to/photo.jpg`.
+`make venv` creates `.venv` from `uv.lock`, with Python 3.11 (the same as CI and the images). Run
+`make lint test` before every commit: CI runs the same checks.
 
-**Adding or upgrading a dependency:** pick the group of the image that needs it (`api`,
-`tracking`, `train`, `streamlit` or `dev`), then commit both `pyproject.toml` and `uv.lock`:
+**Adding a dependency:** pick the group of the image that needs it (`api`, `tracking`, `train`,
+`streamlit` or `dev`), then commit both `pyproject.toml` and `uv.lock`:
 
 ```bash
 uv add --group train some-package==1.2.3
 ```
 
-### Using DagsHub (optional, recommended)
-1. Create a DagsHub repository, then set `MLFLOW_TRACKING_URI`, `MLFLOW_TRACKING_USERNAME` and
-   `MLFLOW_TRACKING_PASSWORD` in `.env` (see `.env.example`).
-2. Add the DVC remote once:
+### Useful commands
 
-```bash
-dvc remote add -d origin https://dagshub.com/<user>/<repo>.dvc
-```
-
-```bash
-dvc remote modify origin --local auth basic
-```
-
-```bash
-dvc remote modify origin --local user <user>
-```
-
-```bash
-dvc remote modify origin --local password <token>
-```
+| Command | What it does |
+|---|---|
+| `make train-dag` | trigger the training pipeline |
+| `make compare` | run the extractor comparison in the background (`tail -f reports/compare.log`) |
+| `make taxa-stats` | refresh the species statistics |
+| `make up-monitoring` | start Prometheus and Grafana |
+| `make mlflow-local` | start the offline MLflow fallback |
+| `make clean-docker` | reclaim disk after image builds |
+| `make help` | list everything |
 
 ---
 
 ## Repository layout
 
 ```
-├── params.yaml                 taxa, licenses, extractor, thresholds: everything tunable
+├── params.yaml                 species, licenses, extractor, thresholds: everything tunable
 ├── pyproject.toml, uv.lock     dependencies, one group per Docker image, all versions locked
 ├── src/
 │   ├── config.py               paths and environment variables
 │   ├── db.py                   SQLAlchemy schema (observations, photos, predictions, feedback)
 │   ├── data/ingest.py          iNaturalist ingestion, license filter, attribution
+│   ├── data/ingest_drift.py    daily monitoring traffic: fresh photos + true species
 │   ├── features/extract.py     frozen timm extractor and embedding cache
 │   ├── models/train.py         training.py: train, evaluate, log, register, promote, compare
 │   ├── models/predict.py       predict.py: load the champion and identify a photo
 │   ├── models/conformal.py     split conformal prediction
-│   ├── monitoring/drift.py     Evidently drift and feedback accuracy
+│   ├── models/ood.py           out-of-scope detection (k-nearest-neighbour distance)
+│   ├── monitoring/drift.py     Evidently drift and production accuracy
 │   └── api/main.py             FastAPI service
 ├── airflow/dags/               species_training, species_monitoring
 ├── streamlit_app/app.py        user interface
-├── scripts/                    traffic simulator, taxa statistics
+├── scripts/taxa_stats.py       iNaturalist counts per species
+├── reports/                    extractor comparison, species statistics
 ├── docker/                     one Dockerfile per service
 ├── monitoring/                 Prometheus config, Grafana datasource, dashboard and alert
 ├── k8s/api.yaml                optional k3s deployment of the API with autoscaling
@@ -256,32 +332,37 @@ dvc remote modify origin --local password <token>
 |---|---|---|
 | 1 | ~10 taxa, frozen extractor, ingestion-to-deployment chain closed | ✅ |
 | 1 | License filtering and attribution kept through the pipeline | ✅ |
-| 2 | Same-protocol comparison of extractors, accuracy vs cost (`make compare`) | ✅ script, results to fill in |
-| 2 | Service optimisation: CPU-only torch, baked weights, slim API image | ✅ partial |
-| 2 | Versioning a growing dataset with DVC, hardlinked cache | ✅ |
-| 3 | Feedback collection, production accuracy, prediction history | ✅ |
-| 3 | Label revisions (past predictions when the ground truth changes) | 📝 design in `docs/ROADMAP.md` |
-| 4 | Out-of-perimeter detection | ✅ partial (empty or ambiguous conformal set → review) |
-| 4 | New taxon without manual work | ✅ add a name to `params.yaml`: ingestion, training and promotion handle it |
+| 2 | Same-protocol comparison of extractors, gain vs service cost | ✅ MobileNetV3 kept |
+| 2 | Service optimisation: CPU-only torch, baked weights, one dependency group per image | ✅ |
+| 2 | Versioning a growing dataset, sustainable storage | ✅ DVC + DagsHub, hardlinked cache |
+| 3 | Automatic collection of validated identifications, production accuracy, history | ✅ daily collector |
+| 3 | Label revisions | 📝 design in `docs/ROADMAP.md` |
+| 4 | Detection of photos outside the perimeter | ✅ k-nearest-neighbour detector |
+| 4 | New taxon without manual intervention | ✅ add a name to `params.yaml` |
+| 4 | Active selection of photos for review | 📝 design in `docs/ROADMAP.md` |
 
-## Design choices
+## Design choices and known limitations
 
-- **FastAPI rather than BentoML for serving.** The MLflow registry already handles model
-  versioning, and one serving framework is easier to explain and debug in a week.
-- **Logistic regression rather than fine-tuning.** It trains in seconds, is well calibrated enough
-  for conformal prediction, and keeps the focus on the chain.
-- **Embeddings as the drift signal.** Raw pixels are high-dimensional and noisy. PCA on the
-  embeddings captures what the model actually "sees".
-- **Airflow runs project code in its own virtualenv.** Airflow 2.10 pins SQLAlchemy 1.4, while
-  the project uses 2.0; separate interpreters avoid the conflict.
-- **uv with one dependency group per image.** Each image installs only what it needs (the
-  Streamlit image has no torch), and all of them come from the same lock file.
+- **FastAPI rather than BentoML:** the MLflow registry already versions models; one serving
+  framework is easier to explain and debug.
+- **Logistic regression rather than fine-tuning:** trains in seconds, well suited to conformal
+  calibration, keeps the focus on the chain.
+- **Airflow runs project code in its own virtualenv:** Airflow 2.10 pins SQLAlchemy 1.4, the
+  project uses 2.0.
+- **Airflow is the pipeline orchestrator,** so there is no `dvc.yaml`: the Airflow graph is the
+  pipeline diagram.
+- **Look-alike species** (e.g. the viceroy butterfly, which mimics the monarch) are predicted as
+  the species they imitate. Only adding them to the perimeter solves that.
+- **Feedback measures accuracy in production but is not yet added to the training data.**
+- **Security is course-grade:** default passwords and basic auth. A real deployment needs the
+  checklist in `docs/ROADMAP.md`.
 
 ## References
 
 - Van Horn et al., *The iNaturalist Species Classification and Detection Dataset*, 2017.
 - Cui et al., *Class-Balanced Loss Based on Effective Number of Samples*, 2019.
 - Angelopoulos & Bates, *A Gentle Introduction to Conformal Prediction*, 2021.
+- Sun et al., *Out-of-Distribution Detection with Deep Nearest Neighbors*, 2022.
 - iNaturalist open data: https://github.com/inaturalist/inaturalist-open-data
 
 Training photos © their respective iNaturalist authors, used under the Creative Commons license
