@@ -51,8 +51,8 @@ down:            ## stop the stack (volumes kept)
 logs:
 > docker compose logs -f --tail=100
 
-train-dag:       ## trigger the Airflow training DAG through the API
-> curl -s -X POST -u admin:$${API_ADMIN_PASSWORD:-change-me} localhost:8000/train
+train-dag:       ## trigger the Airflow training DAG through the API (admin password read from .env)
+> @pw=$$(grep -E '^API_ADMIN_PASSWORD=' .env 2>/dev/null | cut -d= -f2- | sed 's/[[:space:]]*#.*//'); curl -sS -w '\nHTTP %{http_code}\n' -X POST -u "admin:$${pw:-change-me}" localhost:8000/train
 
 clean-docker:    ## reclaim disk: dangling images and build cache
 > docker image prune -f && docker builder prune -f
