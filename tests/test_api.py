@@ -53,3 +53,23 @@ def test_grafana_resolved_alert_is_ignored(client):
     r = client.post("/webhooks/grafana", json={"status": "resolved"},
                     auth=(config.API_ADMIN_USER, config.API_ADMIN_PASSWORD))
     assert r.json() == {"status": "ignored"}
+
+
+def test_model_loads_later_when_mlflow_was_down_at_startup(monkeypatch):
+    """After a reboot the API can start before MLflow is reachable: it must keep retrying."""
+    attempts = []
+
+    def flaky_loader():
+        attempts.append(1)
+        main.STATE["last_attempt"] = main.time.monotonic()
+        main.STATE["predictor"] = FakePredictor() if len(attempts) >= 2 else None
+
+    monkeypatch.setattr(main, "load_predictor", flaky_loader)
+    main.STATE.update(predictor=None, last_attempt=0.0)
+    with TestClient(main.app) as c:  # startup: first attempt fails
+        assert c.get("/health").json()["model_loaded"] is False  # too soon to retry
+        assert c.post("/predict", files={"file": ("x.jpg", b"x")}).status_code == 503
+        main.STATE["last_attempt"] -= main.RETRY_SECONDS + 1  # time passes
+        assert c.get("/health").json()["model_loaded"] is True
+    assert len(attempts) == 2
+    main.STATE.update(predictor=None, last_attempt=0.0)

@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import secrets
+import time
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -21,7 +22,8 @@ from src import config
 from src.db import Feedback, Prediction, session
 
 log = logging.getLogger("api")
-STATE: dict = {"predictor": None}
+STATE: dict = {"predictor": None, "last_attempt": 0.0}
+RETRY_SECONDS = 30  # while no model is loaded, try again at most this often
 
 PREDICTIONS = Counter("species_predictions_total", "Predictions served", ["needs_review"])
 CONFIDENCE = Histogram("species_prediction_confidence", "Top-1 probability",
@@ -34,12 +36,20 @@ MODEL_VERSION = Gauge("species_model_version", "Champion version currently serve
 
 def load_predictor():
     from src.models.predict import Predictor
+    STATE["last_attempt"] = time.monotonic()
     try:
         STATE["predictor"] = Predictor()
         MODEL_VERSION.set(float(STATE["predictor"].version))
     except Exception as e:  # the API must start even before the first model exists
         log.warning("no model loaded: %s", e)
         STATE["predictor"] = None
+
+
+def ensure_model():
+    """Load the champion if none is loaded yet, e.g. MLflow was not reachable when the API started
+    (after a reboot) or no model had been trained yet. Retried at most every RETRY_SECONDS."""
+    if STATE["predictor"] is None and time.monotonic() - STATE["last_attempt"] > RETRY_SECONDS:
+        load_predictor()
 
 
 @asynccontextmanager
@@ -66,6 +76,7 @@ def admin(creds: HTTPBasicCredentials = Depends(security)):
 
 
 def predictor():
+    ensure_model()
     if STATE["predictor"] is None:
         raise HTTPException(503, "No model in production yet: run the training pipeline first")
     return STATE["predictor"]
@@ -73,7 +84,8 @@ def predictor():
 
 @app.get("/health", tags=["service"])
 def health():
-    """Liveness check, and whether a model is loaded."""
+    """Liveness check, and whether a model is loaded (retries loading it if not)."""
+    ensure_model()
     return {"status": "ok", "model_loaded": STATE["predictor"] is not None}
 
 
@@ -157,4 +169,4 @@ def grafana_webhook(payload: dict):
 def reload():
     """Reload the model that holds the champion alias."""
     load_predictor()
-    return health()
+    return {"status": "ok", "model_loaded": STATE["predictor"] is not None}
