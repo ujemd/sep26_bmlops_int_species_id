@@ -1,4 +1,7 @@
 [core]
     no_scm = True
+    remote = origin
 [cache]
     type = "hardlink,symlink"
+['remote "origin"']
+    url = https://dagshub.com/ujemd/sep26_bmlops_int_species_id.dvc
